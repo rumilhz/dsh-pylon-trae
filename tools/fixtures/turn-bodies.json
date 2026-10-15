@@ -1,0 +1,426 @@
+{
+  "schema": "dsh-pylon-trae/turn-bodies@1",
+  "generatedBy": "tools/emit-turn-bodies.mjs",
+  "generatedAt": "2026-10-14T16:07:38.010Z",
+  "verificationTarget": {
+    "kind": "source",
+    "module": "src/protocol.ts",
+    "function": "buildTraeBody",
+    "why": "package.json main is ./src/index.ts (the host strips types, so source is the shipped artifact) and lib/ holds only the browser settings card",
+    "digests": {
+      "src/protocol.ts": "de8bc5231ed89844b09fb9ccba46746f391d50e911bf401754f915e84c59c85a",
+      "src/catalog.ts": "1587e8a002c50f14bb2f7505550d678f50548480e0878726f8b14f1255cada77",
+      "src/format.ts": "ae434323da300e28c7784a9f791ac131321efc95dd6341d462ddae80dc18187d"
+    }
+  },
+  "cases": [
+    {
+      "id": "probe-ping",
+      "why": "The model-probe body, verbatim from src/api.ts:387 — and the one case that sends no `stream`, so it also pins that `stream:true` is forced rather than copied.",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 0
+      },
+      "target": {
+        "configName": "DeepSeek-V4-Flash-Official",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[0]) = DeepSeek-V4-Flash-Official",
+      "request": {
+        "model": "DeepSeek-V4-Flash-Official",
+        "messages": [
+          {
+            "role": "user",
+            "content": "ping"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"ping\"}]}],\"model\":\"DeepSeek-V4-Flash-Official\",\"config_name\":\"DeepSeek-V4-Flash-Official\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    },
+    {
+      "id": "plain-text-multi-turn",
+      "why": "Ordinary chat: every string content becomes [{type:\"text\",text}], array content is left exactly as it arrived.",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 2
+      },
+      "target": {
+        "configName": "glm-5.2",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[2]) = glm-5.2",
+      "request": {
+        "model": "glm-5.2",
+        "stream": true,
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are terse."
+          },
+          {
+            "role": "user",
+            "content": "first question"
+          },
+          {
+            "role": "assistant",
+            "content": "first answer"
+          },
+          {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "second question, already an array"
+              }
+            ]
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"You are terse.\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"first question\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first answer\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"second question, already an array\"}]}],\"model\":\"glm-5.2\",\"config_name\":\"glm-5.2\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    },
+    {
+      "id": "developer-role",
+      "why": "A `developer` message is renamed to `system` (the one role translation), while the text is translated independently — both must happen on the same message.",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "ai",
+        "index": 0
+      },
+      "target": {
+        "configName": "gemini-3.1-pro",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.ai[0]) = gemini-3.1-pro",
+      "request": {
+        "model": "gemini-3.1-pro",
+        "stream": true,
+        "messages": [
+          {
+            "role": "developer",
+            "content": "Answer in one word."
+          },
+          {
+            "role": "user",
+            "content": "capital of France?"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"system\",\"content\":[{\"type\":\"text\",\"text\":\"Answer in one word.\"}]},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"capital of France?\"}]}],\"model\":\"gemini-3.1-pro\",\"config_name\":\"gemini-3.1-pro\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    },
+    {
+      "id": "thinking-replay",
+      "why": "Replayed thinking: `reasoning_content` on an assistant turn must survive untouched — this builder translates shapes, never inspects model output.",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 3
+      },
+      "target": {
+        "configName": "kimi-k2.6",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[3]) = kimi-k2.6",
+      "request": {
+        "model": "kimi-k2.6",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "why is the sky blue?"
+          },
+          {
+            "role": "assistant",
+            "content": "Rayleigh scattering.",
+            "reasoning_content": "The user asks a physics question; answer in one line."
+          },
+          {
+            "role": "user",
+            "content": "and at sunset?"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"why is the sky blue?\"}]},{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Rayleigh scattering.\"}],\"reasoning_content\":\"The user asks a physics question; answer in one line.\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"and at sunset?\"}]}],\"model\":\"kimi-k2.6\",\"config_name\":\"kimi-k2.6\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    },
+    {
+      "id": "tools-declared",
+      "why": "Tool declarations: a JSON-Schema `parameters` object is sent as a JSON *string*; a malformed entry (no `function`) is skipped instead of throwing.",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 2
+      },
+      "target": {
+        "configName": "glm-5.2",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[2]) = glm-5.2",
+      "request": {
+        "model": "glm-5.2",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "what time is it?"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "description": "Current local time",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": []
+              }
+            }
+          },
+          {
+            "type": "function"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what time is it?\"}]}],\"model\":\"glm-5.2\",\"config_name\":\"glm-5.2\",\"function\":\"solo_work_lite\",\"stream\":true,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"description\":\"Current local time\",\"parameters\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"tz\\\":{\\\"type\\\":\\\"string\\\"}},\\\"required\\\":[]}\"}},{\"type\":\"function\"}]}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream",
+        "tools"
+      ]
+    },
+    {
+      "id": "tool-call-backfill",
+      "why": "The tool loop closing: an assistant `tool_calls[].function` becomes the wire's `function_call`, and a `tool` result must carry a non-empty `tool_call_id`.",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 2
+      },
+      "target": {
+        "configName": "glm-5.2",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[2]) = glm-5.2",
+      "request": {
+        "model": "glm-5.2",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "what time is it?"
+          },
+          {
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [
+              {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                  "name": "get_time",
+                  "arguments": "{}"
+                }
+              }
+            ]
+          },
+          {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "{\"iso\":\"2026-10-14T23:55:00+08:00\"}"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "get_time",
+              "parameters": {
+                "type": "object",
+                "properties": {}
+              }
+            }
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what time is it?\"}]},{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function_call\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]},{\"role\":\"tool\",\"tool_call_id\":\"call_1\",\"content\":[{\"type\":\"text\",\"text\":\"{\\\"iso\\\":\\\"2026-10-14T23:55:00+08:00\\\"}\"}]}],\"model\":\"glm-5.2\",\"config_name\":\"glm-5.2\",\"function\":\"solo_work_lite\",\"stream\":true,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"parameters\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{}}\"}}]}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream",
+        "tools"
+      ]
+    },
+    {
+      "id": "reasoning-effort",
+      "why": "A declared thinking level travels as `reasoning_effort` with the spelling the directory chose (src/seed.ts maps pi levels to Trae spellings).",
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 2
+      },
+      "target": {
+        "configName": "glm-5.2",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[2]) = glm-5.2",
+      "request": {
+        "model": "glm-5.2",
+        "stream": true,
+        "reasoning_effort": "light",
+        "messages": [
+          {
+            "role": "user",
+            "content": "think briefly"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"think briefly\"}]}],\"model\":\"glm-5.2\",\"config_name\":\"glm-5.2\",\"function\":\"solo_work_lite\",\"stream\":true,\"reasoning_effort\":\"light\"}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream",
+        "reasoning_effort"
+      ]
+    },
+    {
+      "id": "unknown-model-passthrough",
+      "why": "A model id the roster does not know: src/shim.ts:202 targets it with the default function rather than refusing, so Trae's own 4001 is the answer.",
+      "targetFrom": {
+        "kind": "shim-unknown",
+        "configName": "some-model-typed-by-the-user"
+      },
+      "target": {
+        "configName": "some-model-typed-by-the-user",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "src/shim.ts:202 unknown-model fallback",
+      "request": {
+        "model": "some-model-typed-by-the-user",
+        "stream": true,
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"some-model-typed-by-the-user\",\"config_name\":\"some-model-typed-by-the-user\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    },
+    {
+      "id": "reasoning-effort-empty",
+      "why": "DOCUMENTED DIVERGENCE (see tools/test-contract.ts KNOWN_DIVERGENCES): an empty spelling is dropped here and forwarded upstream. Synthetic: pi-ai only sends a level the directory declared, so this shape should not occur in real traffic.",
+      "synthetic": true,
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 2
+      },
+      "target": {
+        "configName": "glm-5.2",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[2]) = glm-5.2",
+      "request": {
+        "model": "glm-5.2",
+        "stream": true,
+        "reasoning_effort": "",
+        "messages": [
+          {
+            "role": "user",
+            "content": "no level named"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"no level named\"}]}],\"model\":\"glm-5.2\",\"config_name\":\"glm-5.2\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    },
+    {
+      "id": "function-passthrough",
+      "why": "DOCUMENTED DIVERGENCE (see tools/test-contract.ts KNOWN_DIVERGENCES): a caller-supplied `function` is honoured upstream and ignored here. Synthetic: pi-ai's openai-completions request has no top-level `function`.",
+      "synthetic": true,
+      "targetFrom": {
+        "kind": "roster",
+        "region": "cn",
+        "index": 0
+      },
+      "target": {
+        "configName": "DeepSeek-V4-Flash-Official",
+        "fn": "solo_work_lite"
+      },
+      "targetSource": "wireTargetOf(FALLBACK_MODELS.cn[0]) = DeepSeek-V4-Flash-Official",
+      "request": {
+        "model": "DeepSeek-V4-Flash-Official",
+        "stream": true,
+        "function": "solo_coder",
+        "messages": [
+          {
+            "role": "user",
+            "content": "hello"
+          }
+        ]
+      },
+      "body": "{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"hello\"}]}],\"model\":\"DeepSeek-V4-Flash-Official\",\"config_name\":\"DeepSeek-V4-Flash-Official\",\"function\":\"solo_work_lite\",\"stream\":true}",
+      "bodyKeys": [
+        "messages",
+        "model",
+        "config_name",
+        "function",
+        "stream"
+      ]
+    }
+  ]
+}

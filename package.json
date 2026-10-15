@@ -1,0 +1,63 @@
+{
+  "name": "dsh-pylon-trae",
+  "version": "0.1.0",
+  "description": "Trae LLM provider for DeepSeek Harness: reads the credential an already signed-in Trae desktop or CLI install wrote, serves it over a fixed loopback shim, and seeds one editable provider entry on the models page. Trae's own data is read-only.",
+  "license": "MIT",
+  "author": "rumilhz",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": {
+      "default": "./lib/client.js"
+    }
+  },
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "trae",
+    "llm-provider",
+    "openai-compatible",
+    "cordis-plugin"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rumilhz/dsh-pylon-trae.git"
+  },
+  "homepage": "https://github.com/rumilhz/dsh-pylon-trae#readme",
+  "bugs": {
+    "url": "https://github.com/rumilhz/dsh-pylon-trae/issues"
+  },
+  "files": [
+    "src",
+    "lib",
+    "tools",
+    "tools/fixtures",
+    "install.mjs",
+    "部署-新电脑.md",
+    "cordis.patch.yml",
+    "README.md",
+    "进展.md",
+    "接口契约.md",
+    "LICENSE",
+    "发布.md"
+  ],
+  "scripts": {
+    "pack": "node tools/pack.mjs"
+  },
+  "dependencies": {},
+  "peerDependencies": {},
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  }
+}

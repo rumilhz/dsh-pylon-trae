@@ -1,0 +1,9 @@
+# Mount the self-owned Trae provider bundle.
+#
+# The provider entry the Models page edits is NOT declared here: this plugin
+# seeds it into the `llm-pi-ai` namespace at startup (see src/seed.ts), because
+# the Models page only renders an editor for that namespace's routes
+# (dsh-client-ui-settings-models/lib/client.js:1493-1497).
+- insert:
+    - id: dsh-pylon-trae
+      name: 'dsh-pylon-trae'

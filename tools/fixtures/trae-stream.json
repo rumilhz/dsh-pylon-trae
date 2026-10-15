@@ -1,0 +1,65 @@
+{
+  "schema": "dsh-pylon-trae/trae-stream@1",
+  "provenance": "synthetic",
+  "note": [
+    "WHAT THIS IS: the Trae-side SSE bytes our decoder is fed, written down as an explicit specimen so the contract test can compare our parser against the pinned upstream parser byte for byte.",
+    "WHAT IT IS NOT: a live capture. Nothing here was recorded from the gateway — we are offline tonight, and no request was made. Event NAMES and payload FIELDS follow the shapes already recorded from observation in 进展.md:55-63 and src/protocol.ts:9-16; the framing (CRLF, chunk splits, multi-line data, id/retry, bare data, [DONE]) is the SSE specification's, not ours.",
+    "WHY IT STILL COUNTS: the two things under contract here — the set of `event:` names and the framing rules — are exactly what the upstream parser implements, and they can be compared on constructed bytes just as well as on captured ones. A divergence found here is a real divergence; the file says nothing about whether Trae emits any given event.",
+    "`chunks` are the byte boundaries the decoder is fed at: several deliberately split a line, an event name, and a CRLF pair, because that is what a socket does."
+  ],
+  "canonical": {
+    "why": "One pass over every named event both implementations know, plus an unknown name, an error carrying `extra`, a multi-line data payload, id/retry fields and the [DONE] sentinel.",
+    "chunks": [
+      "event: request_wait_in_queue\r\ndata: {\"position\":2}\r\n\r\nevent: progress_",
+      "notice\ndata: {\"notice\":\"still working\",\"stage\":\"planning\"}\n\nevent: token_usage\ndata: {\"prompt_tokens\":12,\"completion_tokens\":15,\"total_tokens\":27,\"reasoning_tokens\":9,\"cache_read_input_tokens\":128,\"cache_creation_input_tokens\":64}\n\nevent: output\ndata: {\"reasoning_content\":\"The user wants exactly \\\"pong\\\".\"}\n\nevent: output\ndata: {\"response\":\"po\"}\n\n",
+      "event: output\ndata: {\"response\":\"ng\"}\n\nevent: output\ndata: {\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function_call\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]}\n\nevent: done\ndata: {\"finish_reason\":\"tool_calls\"}\n\nevent: heartbeat\ndata: {\"ts\":1}\n\nevent: output\ndata: {\"response\":\"first\",\ndata: \"reasoning_content\":\"split across lines\"}\n\n",
+      "id: 42\nretry: 5000\nevent: error\ndata: {\"code\":1005,\"message\":\"\",\"extra\":\"{\\\"plan\\\":1}\"}\n\ndata: [DONE]\n\n"
+    ]
+  },
+  "emitProbe": {
+    "why": "The Trae-side input that drives OUR downstream emission: token_usage, a thinking delta, two text deltas, a tool-call delta, then done. What comes out is written to the pi-ai-facing socket exactly as src/shim.ts:239 and :248 write it — and the reference's own SseDecoder is pointed at those bytes, so 'we emit something it understands' is checked on real output, not on intent.",
+    "expectedPayloads": 6,
+    "chunks": [
+      "event: token_usage\ndata: {\"prompt_tokens\":12,\"completion_tokens\":15,\"total_tokens\":27,\"reasoning_tokens\":9,\"cache_read_input_tokens\":128}\n\nevent: o",
+      "utput\ndata: {\"reasoning_content\":\"Thinking about it.\"}\n\nevent: output\ndata: {\"response\":\"po\"}\n\nevent: output\ndata: {\"response\":\"ng\"}\n\nevent: output\ndata: {\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function_call\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]}\n\n",
+      "event: done\ndata: {\"finish_reason\":\"tool_calls\"}\n\n"
+    ]
+  },
+  "probes": [
+    {
+      "id": "event-name-trailing-space",
+      "why": "`event: token_usage ` with a trailing space. We trim the name; the reference strips one leading space only.",
+      "chunks": ["event: token_usage \ndata: {\"prompt_tokens\":3}\n\n"]
+    },
+    {
+      "id": "comment-and-blank-line",
+      "why": "An SSE comment line, then a blank line with no data before it. Both must ignore the comment and emit nothing for the empty dispatch.",
+      "chunks": [": keep-alive\n\nevent: done\ndata: {\"finish_reason\":\"stop\"}\n\n"]
+    },
+    {
+      "id": "bare-data-without-colon",
+      "why": "A `data` line with no colon. The SSE specification reads that as the field `data` with an empty value, so an event IS dispatched with an empty payload — this is where we and the reference part company.",
+      "chunks": ["event: output\ndata\n\n"]
+    },
+    {
+      "id": "no-final-blank-line",
+      "why": "The stream's last line IS newline-terminated but no blank line closes the event. Both parsers must still flush the tail, so the answer must not be lost.",
+      "chunks": ["event: done\ndata: {\"finish_reason\":\"stop\"}\n"]
+    },
+    {
+      "id": "unterminated-final-line",
+      "why": "The stream ends mid-line, with no trailing newline at all — an aborted connection, or a proxy that closes without the final CRLF. The reference's finish() consumes the leftover buffer before dispatching; this probe exists to find out what we do with it.",
+      "chunks": ["event: done\ndata: {\"finish_reason\":\"stop\"}"]
+    },
+    {
+      "id": "empty-event-name",
+      "why": "`event:` with an empty value. The reference omits the key entirely; we keep an empty string — both must still decode the delta by its payload.",
+      "chunks": ["event:\ndata: {\"response\":\"x\"}\n\n"]
+    },
+    {
+      "id": "crlf-split-between-cr-and-lf",
+      "why": "The chunk boundary falls between the CR and the LF of a CRLF pair — the classic socket split.",
+      "chunks": ["event: done\r", "\ndata: {\"finish_reason\":\"stop\"}\r\n\r\n"]
+    }
+  ]
+}
