@@ -119,7 +119,7 @@ const { privateKey: PRIVATE_PEM, publicKey: PUBLIC_PEM } = generateKeyPairSync('
 })
 const DEVICE: TraeRefreshDevice = {
   machineId: 'machine-1',
-  deviceId: '1000000000000000',
+  deviceId: '1599141713047850',
   deviceName: 'tester',
   appVersion: '3.3.104',
   osVersion: 'Windows 10.0.26100',
@@ -226,7 +226,7 @@ const storePath = credentialStorePath(store, ID)
   const body = bodyOf(calls[0])
   check('envelope: ClientID (desktop) + empty ClientSecret + the refresh token', body['ClientID'] === 'ono9krqynydwx5' && body['ClientSecret'] === '' && body['RefreshToken'] === 'refresh-token-one', JSON.stringify({ ClientID: body['ClientID'], ClientSecret: body['ClientSecret'] }))
   const info = body['DeviceInfo'] as Record<string, unknown>
-  check('DeviceInfo carries the device-centre id + platform code + public key', info['DeviceID'] === '1000000000000000' && info['PlatformCode'] === 'IDE_PC' && info['DevicePublicKey'] === PUBLIC_PEM, JSON.stringify({ ID: info['DeviceID'], code: info['PlatformCode'] }))
+  check('DeviceInfo carries the device-centre id + platform code + public key', info['DeviceID'] === '1599141713047850' && info['PlatformCode'] === 'IDE_PC' && info['DevicePublicKey'] === PUBLIC_PEM, JSON.stringify({ ID: info['DeviceID'], code: info['PlatformCode'] }))
   check('DeviceInfo carries the machine id and the OS pair', info['MachineID'] === 'machine-1' && info['OSInfo'] === 'windows' && String(info['OSVersion']).startsWith('Windows'), JSON.stringify(info['OSInfo']))
   check('IDEVersion is the install\'s own app version', body['IDEVersion'] === '3.3.104' && info['ClientVersion'] === '3.3.104')
   if (result.ok) {
@@ -401,17 +401,17 @@ console.log('\n[12] GET /status — the fields, and the sentence on the existing
 // ------------------------------------------------------- 13. the device document
 console.log('\n[13] the device facts read out of storage.json')
 {
-  const dcKey = 'iCubeAuthInfo://icube-dc:1000000000000000'
+  const dcKey = 'iCubeAuthInfo://icube-dc:1599141713047850'
   const pair = deviceKeyPairOf({ [dcKey]: JSON.stringify({ privateKeyPEM: 'P', publicKeyPEM: 'K' }), 'iCubeAuthInfo://usertag': 'x' })
   check('a plain-JSON device entry yields the keypair', pair?.privateKeyPEM === 'P' && pair?.publicKeyPEM === 'K')
   check('an entry with no keypair is ABSENT, not an error', deviceKeyPairOf({ [dcKey]: '{}' }) === undefined && deviceKeyPairOf({}) === undefined)
   check('a malformed entry is treated as absent (upstream :1871-1889)', deviceKeyPairOf({ [dcKey]: 'not-json' }) === undefined)
-  check('the device-centre id is the single dc key\'s suffix', deviceCenterIdOf({ [dcKey]: '{}', 'iCacheAuthInfo://usertag': 'x', 'iCubeAuthInfo://icube.cloudide': 'x' }) === '1000000000000000')
+  check('the device-centre id is the single dc key\'s suffix', deviceCenterIdOf({ [dcKey]: '{}', 'iCacheAuthInfo://usertag': 'x', 'iCubeAuthInfo://icube.cloudide': 'x' }) === '1599141713047850')
   check('two dc keys are ambiguous -> undefined, never a coin flip', deviceCenterIdOf({ 'iCubeAuthInfo://icube-dc:a': '{}', 'iCubeAuthInfo://icube-dc:b': '{}' }) === undefined)
   const deviceDoc = join(store, 'storage.json')
   writeFileSync(deviceDoc, JSON.stringify({ [dcKey]: JSON.stringify({ privateKeyPEM: 'P', publicKeyPEM: 'K' }) }))
   const read = readStorageDevice(deviceDoc)
-  check('one read returns both halves of the device facts', read.deviceId === '1000000000000000' && read.keyPair?.privateKeyPEM === 'P')
+  check('one read returns both halves of the device facts', read.deviceId === '1599141713047850' && read.keyPair?.privateKeyPEM === 'P')
   check('a missing or unreadable document is {} — never a throw', same(readStorageDevice(join(store, 'absent.json')), {}) && same(readStorageDevice(store), {}))
 }
 

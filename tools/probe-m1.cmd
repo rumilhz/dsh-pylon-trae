@@ -8,13 +8,15 @@ rem Usage:
 rem   probe-m1.cmd                  paths + credentials + live model directory
 rem   probe-m1.cmd --no-network     paths + credentials only (no HTTP at all)
 rem
-rem It uses the DSH runtime node when present (the Node this profile is known to
-rem run) and otherwise falls back to `node` from PATH.
+rem It uses the DSH runtime node when DSH_NODE names one (the same variable the
+rem cold-start harnesses pass to their children) and otherwise falls back to
+rem `node` from PATH. Set it like:
+rem   set "DSH_NODE=<dsh-install>\resources\runtime\primary-runtime\dependencies\node\bin\node.exe"
 rem ===========================================================================
 setlocal
 set "HERE=%~dp0"
 set "NODE=node"
-set "DSHNODE=<dsh-node>"
-if exist "%DSHNODE%" set "NODE=%DSHNODE%"
+set "DSHNODE=%DSH_NODE%"
+if defined DSHNODE if exist "%DSHNODE%" set "NODE=%DSHNODE%"
 "%NODE%" "%HERE%probe-m1.ts" %*
 exit /b %ERRORLEVEL%

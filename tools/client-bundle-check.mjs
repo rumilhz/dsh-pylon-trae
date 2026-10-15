@@ -355,7 +355,7 @@ const noGhosts = (label, text) => {
 // (c) empty — an answer arrived and carried nothing. Never a blank row.
 {
   const text = textOf(view({
-    status: { phase: 'ready', detail: '', summary: { lines: ['账号 用户1000000000', '来源 desktop · cn', '到期 2026-10-21 11:47（剩 6 天 3 小时）'], accounts: [] }, payload: { region: 'cn', port: 7864, modelCount: 0, accounts: [], credential: {} } },
+    status: { phase: 'ready', detail: '', summary: { lines: ['账号 用户1007740821', '来源 desktop · cn', '到期 2026-10-21 11:47（剩 6 天 3 小时）'], accounts: [] }, payload: { region: 'cn', port: 7864, modelCount: 0, accounts: [], credential: {} } },
     usage: { phase: 'ready', detail: '', rows: [], expanded: false },
     checkin: { phase: 'ready', detail: '', text: '服务端状态：今日未领取 · 今日奖励 100', checkedIn: false },
     test: { phase: 'ready', detail: '', lines: [] }
@@ -370,15 +370,15 @@ const noGhosts = (label, text) => {
 // (d) ready — real payload shapes from src/api.ts and the live CLI readings.
 {
   const accounts = [
-    { id: 'a1', userId: '100000000000000', accountName: '用户1000000000', edition: 'cn', source: 'desktop', expiresAtMs: 1792506420000, active: true },
-    { id: 'a2', userId: '100000000000000', edition: 'cn', source: 'cli', expiresAtMs: 1792184100000, active: false }
+    { id: 'a1', userId: '357806796716699', accountName: '用户1007740821', edition: 'cn', source: 'desktop', expiresAtMs: 1792506420000, active: true },
+    { id: 'a2', userId: '357806796716699', edition: 'cn', source: 'cli', expiresAtMs: 1792184100000, active: false }
   ]
   const text = textOf(view({
     status: {
       phase: 'ready',
       detail: '',
-      summary: I.statusSummary({ region: 'cn', port: 7864, modelCount: 79, accounts, credential: { source: 'desktop', edition: 'cn', userId: '100000000000000', accountName: '用户1000000000', host: 'https://api.trae.cn', expiresAtMs: 1792506420000 } }),
-      payload: { region: 'cn', port: 7864, modelCount: 79, accounts, credential: { source: 'desktop', edition: 'cn', userId: '100000000000000', accountName: '用户1000000000', host: 'https://api.trae.cn', expiresAtMs: 1792506420000 } }
+      summary: I.statusSummary({ region: 'cn', port: 7864, modelCount: 79, accounts, credential: { source: 'desktop', edition: 'cn', userId: '357806796716699', accountName: '用户1007740821', host: 'https://api.trae.cn', expiresAtMs: 1792506420000 } }),
+      payload: { region: 'cn', port: 7864, modelCount: 79, accounts, credential: { source: 'desktop', edition: 'cn', userId: '357806796716699', accountName: '用户1007740821', host: 'https://api.trae.cn', expiresAtMs: 1792506420000 } }
     },
     activeAccountId: 'a1',
     usage: { phase: 'ready', detail: '', rows: I.creditRows({ credits: { total_amount: 4600, consumed_amount: 0.01, 'user_entitlement_pack_list[0].credits_amount': 100 } }), expanded: false },
@@ -386,7 +386,7 @@ const noGhosts = (label, text) => {
     rebuild: { phase: 'ready', detail: '', summary: I.refreshSummary({ ok: true, kind: 'rebuilt', modelCount: 79, outcome: { kind: 'rebuilt', ns: 'llm-pi-ai', addedModels: ['new-model-x'], keptModels: 79, backupPath: 'C:/tmp/backup', offeredModels: [] } }) },
     test: { phase: 'ready', detail: '', lines: I.testLines({ results: [{ id: 'mimo-v2.6-flash', verdict: 'available', detail: 'answered 200' }, { id: 'glm-5.2', verdict: 'needs-plan', detail: 'Trae requires a paid plan for this model' }] }) }
   }))
-  has('(ready) the account name is shown', text, '用户1000000000')
+  has('(ready) the account name is shown', text, '用户1007740821')
   has('(ready) the credential source is shown', text, 'desktop · cn')
   has('(ready) the gateway is shown', text, 'https://api.trae.cn')
   has('(ready) the expiry is shown', text, '到期')
@@ -407,7 +407,7 @@ const noGhosts = (label, text) => {
       return found[0]
     }
     const optionValues = (select) => (Array.isArray(select.props.children) ? select.props.children : [select.props.children]).map((option) => option.props.value)
-    const activePayload = { region: 'cn', port: 7864, accounts, credential: { source: 'desktop', edition: 'cn', userId: 'u', accountName: '用户1000000000', expiresAtMs: 1792506420000 } }
+    const activePayload = { region: 'cn', port: 7864, accounts, credential: { source: 'desktop', edition: 'cn', userId: 'u', accountName: '用户1007740821', expiresAtMs: 1792506420000 } }
     const select = findSelect(view({ status: { phase: 'ready', detail: '', summary: I.statusSummary(activePayload), payload: activePayload } }))
     truthy('a <select> is rendered when accounts exist', select !== undefined)
     truthy('the account switcher value matches one of its own options', optionValues(select).includes(select.props.value))
@@ -458,9 +458,9 @@ const noGhosts = (label, text) => {
 {
   const warning = '已选账号 deadbeef0000000000000001 在这台机器上不存在（本机可见 1 个），本次改用 desktop/cn'
   const accounts = [
-    { id: 'a1', userId: '100000000000000', accountName: '用户1000000000', edition: 'cn', source: 'desktop', expiresAtMs: 1792506420000, active: true }
+    { id: 'a1', userId: '357806796716699', accountName: '用户1007740821', edition: 'cn', source: 'desktop', expiresAtMs: 1792506420000, active: true }
   ]
-  const payload = { region: 'cn', port: 7864, modelCount: 79, accounts, accountWarning: warning, credential: { source: 'desktop', edition: 'cn', userId: '100000000000000', accountName: '用户1000000000', expiresAtMs: 1792506420000 } }
+  const payload = { region: 'cn', port: 7864, modelCount: 79, accounts, accountWarning: warning, credential: { source: 'desktop', edition: 'cn', userId: '357806796716699', accountName: '用户1007740821', expiresAtMs: 1792506420000 } }
   const text = textOf(view({ status: { phase: 'ready', detail: '', summary: I.statusSummary(payload), payload } }))
   has('(warning) the account warning is rendered verbatim', text, warning)
   has('...inside the account block (its own heading is still above it)', text, '① 账号')

@@ -1,7 +1,7 @@
 /**
  * dsh-pylon-trae install — 用户侧一条命令：把本插件装进（或从）一个 DSH profile。
  *
- * 语义是从 `_backups\install-into-live-profile.mjs`（手工装进活体
+ * 语义是从 `_backups\trae-pin-20261014\install-into-live-profile.mjs`（手工装进活体
  * profile 的那份）逐条搬过来的，一条没少：
  *
  *   ① 先备份到 profile **之外**（`$DSH_HOME\.dsh-pylon-trae\install-backups\<stamp>\`）
@@ -850,7 +850,7 @@ function rollback() {
 const nodeMajor = Number(process.versions.node.split('.')[0] ?? 0)
 const nodeMinor = Number(process.versions.node.split('.')[1] ?? 0)
 if (nodeMajor < MIN_NODE[0] || (nodeMajor === MIN_NODE[0] && nodeMinor < MIN_NODE[1])) {
-  fail(`Node ${process.versions.node} 太旧（需要 ≥ ${MIN_NODE.join('.')}）`, '用 DSH 自带的 node：<dsh-node>')
+  fail(`Node ${process.versions.node} 太旧（需要 ≥ ${MIN_NODE.join('.')}）`, `用 DSH 自带的那个 node：DSH 安装目录下 resources\\runtime\\…\\node.exe（比系统 node 新），或把系统 node 升到 ≥ ${MIN_NODE.join('.')}`)
 }
 
 if (UNINSTALL) uninstall()

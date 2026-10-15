@@ -449,7 +449,8 @@ export function describeCredentialExpiry(
  * ════════════════════════════════════════════════════════════════════════════
  *
  * Every constant, header, field name and signature below was read out of the
- * pinned snapshot `~/.dsh/trae-pin/dsh-connect-trae-3.4.0/lib/index.js`
+ * pinned upstream snapshot `dsh-connect-trae@3.4.0` (`lib/index.js`), kept under
+ * `$DSH_HOME/trae-pin/` (`DSH_HOME` defaults to `~/.dsh`)
  * (`src/refresh.ts` region, :1649-1852). The line numbers in the comments are the
  * evidence; this module reproduces the shape and nothing else.
  */

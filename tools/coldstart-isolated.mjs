@@ -21,10 +21,10 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
-const PLUGIN_DIR = resolve('<repo>')
-const SCRATCH = resolve('<workspace>/代办清单/02-子代理体系/_rename-scratch/coldstart')
+const PLUGIN_DIR = resolve(import.meta.dirname, '..')
+const SCRATCH = resolve(PLUGIN_DIR, '..', '..', '_rename-scratch', 'coldstart')
 const HOME = join(SCRATCH, 'home')
 const PROFILE_NAME = 'zz-pylon'
 const PROFILE = join(HOME, 'profiles', PROFILE_NAME)
@@ -33,7 +33,20 @@ const OWN_DIR = join(HOME, '.dsh-pylon-trae')
 const TRACE = join(OWN_DIR, 'boot.log')
 const PORT = 17864
 const NAME = 'dsh-pylon-trae'
-const DSH_CMD = '<dsh-cli>'
+/**
+ * The DSH CLI to boot. Explicit override first, else the copy shipped beside the
+ * Node that DSH itself runs on, else `dsh` from PATH — so no machine is named.
+ */
+function dshCli() {
+  const explicit = process.env['DSH_CLI'] ?? process.env['DSH_CMD']
+  if (typeof explicit === 'string' && explicit !== '') return explicit
+  const name = process.platform === 'win32' ? 'dsh.cmd' : 'dsh'
+  // process.execPath is <install>\resources\runtime\primary-runtime\dependencies\node\bin\node.exe
+  const resources = resolve(dirname(process.execPath), '..', '..', '..', '..', '..')
+  const derived = join(resources, 'runtime', 'cli', 'bin', name)
+  return existsSync(derived) ? derived : name
+}
+const DSH_CMD = dshCli()
 const COMSPEC = process.env['ComSpec'] ?? 'cmd.exe'
 
 const sha256 = (t) => createHash('sha256').update(t).digest('hex')

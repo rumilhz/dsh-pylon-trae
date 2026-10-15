@@ -14,8 +14,8 @@
  * name against `dsh.profile.bundles`, so a stale name there is not cosmetic: the
  * guard would refuse to write.)
  *
- * Same discipline as _backups/install-into-live-profile.mjs:
- *   1. back up package.json OUTSIDE the profile (~/.dsh/trae-pin/)
+ * Same discipline as _backups/trae-pin-20261014/install-into-live-profile.mjs:
+ *   1. back up package.json OUTSIDE the profile (`$DSH_HOME\trae-pin\`)
  *   2. edit the JSON structure in memory, write to a temp sibling
  *   3. verify the CANDIDATE key by key BEFORE it replaces the live file
  *   4. create the new junction, then atomically rename the temp over the target
@@ -29,16 +29,41 @@
  *     dsh-subagent-acp-harness) — only OUR one is removed;
  *   · AppData\Roaming\Trae* — never read, never written.
  *
- * Run: <dsh-node> tools/rename-live-profile.mjs [--dry]
+ * Run: <dsh-node> tools/rename-live-profile.mjs [--dry] [--profile <name>] [--home <path>]
  */
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 
 const DRY = process.argv.includes('--dry')
 
-const PROFILE = '$DSH_HOME/profiles/desktop'
-const PLUGIN = '<repo>'
-const PIN = '~/.dsh/trae-pin'
+function option(name) {
+  const index = process.argv.indexOf(name)
+  if (index === -1) return undefined
+  const value = process.argv[index + 1]
+  return value === undefined || value.startsWith('--') ? undefined : value
+}
+
+/**
+ * The plugin directory itself, with any junction resolved away: running this
+ * through the profile's `node_modules` junction must still record the REAL
+ * source tree in `link:`, never the junction that points back at it.
+ */
+function realPluginDir() {
+  const here = resolve(import.meta.dirname, '..')
+  try {
+    return realpathSync.native(here)
+  } catch {
+    return here
+  }
+}
+
+/** Same resolution install.mjs uses: `--home`, then `$DSH_HOME`, then `~/.dsh`. */
+const DSH_HOME = resolve(option('--home') ?? process.env['DSH_HOME'] ?? join(homedir(), '.dsh'))
+const PROFILE = join(DSH_HOME, 'profiles', option('--profile') ?? 'desktop')
+const PLUGIN = realPluginDir()
+/** Backups go under the pin directory, outside the profile being edited. */
+const PIN = join(DSH_HOME, 'trae-pin')
 
 /** The name being retired, and the name replacing it. */
 const OLD_NAME = '@local/dsh-trae'

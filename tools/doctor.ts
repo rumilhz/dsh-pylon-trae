@@ -135,7 +135,7 @@ add(
         id: 'node',
         level: 'bad',
         title: `Node ${process.versions.node} —— 低于 22.6，跑不了 .ts`,
-        fix: `用 DSH 自带的 node：<dsh-node>`
+        fix: `用 DSH 自带的那个 node：DSH 安装目录下 resources\\runtime\\…\\node.exe（比系统 node 新），或把系统 node 升到 ≥22.6`
       }
 )
 

@@ -16,7 +16,7 @@
  * same `buildTraeBody` the shim calls (`src/shim.ts:205`, `src/api.ts:387`), with
  * the same `wireTargetOf()` derivation the shim uses for a roster model, and they
  * are then handed to the pinned upstream implementation of the same protocol
- * (`~/.dsh/trae-pin/dsh-connect-trae-3.4.0`, integrity checked in
+ * (`$DSH_HOME/trae-pin/dsh-connect-trae-3.4.0`, integrity checked in
  * `tools/test-contract.ts`) as the counterparty.
  *
  * ---------------------------------------------------------------------------

@@ -114,7 +114,7 @@ const CREDENTIAL = {
   region: 'cn',
   source: 'desktop',
   storagePath: '',
-  userId: '100000000000000',
+  userId: '357806796716699',
   accountName: 'tester',
   host: 'https://api.trae.cn',
   expiresAtMs: 1792000000000,
@@ -146,7 +146,7 @@ const MANY_MODELS: readonly TraeModel[] = Array.from({ length: 79 }, (_, index) 
 }))
 
 const ACCOUNTS: TraeAccountInfo[] = [
-  { id: 'desktop/cn', userId: '100000000000000', accountName: 'tester', edition: 'cn', source: 'desktop', expiresAtMs: 1792000000000, active: true }
+  { id: 'desktop/cn', userId: '357806796716699', accountName: 'tester', edition: 'cn', source: 'desktop', expiresAtMs: 1792000000000, active: true }
 ]
 
 const REFRESH_OUTCOME: SeedOutcome = { kind: 'rebuilt', ns: 'llm-pi-ai', addedModels: ['m7'], keptModels: 6, backupPath: '/tmp/backup.yml', offeredModels: ['m1'] }
@@ -202,7 +202,7 @@ console.log('\n[1] GET /status')
   const response = await handleApi(get('/status'), deps())
   check('ok:true with region/port/modelCount', response.body['ok'] === true && response.body['region'] === 'cn' && response.body['port'] === 7864 && response.body['modelCount'] === 7, JSON.stringify(response.body))
   const credential = response.body['credential'] as Record<string, unknown>
-  check('credential summary carries no secret', credential['source'] === 'desktop' && credential['userId'] === '100000000000000' && credential['accountName'] === 'tester' && !('accessToken' in credential) && !('refreshToken' in credential), JSON.stringify(credential))
+  check('credential summary carries no secret', credential['source'] === 'desktop' && credential['userId'] === '357806796716699' && credential['accountName'] === 'tester' && !('accessToken' in credential) && !('refreshToken' in credential), JSON.stringify(credential))
   check('accounts are passed through', same(response.body['accounts'], ACCOUNTS))
 }
 {
@@ -211,7 +211,7 @@ console.log('\n[1] GET /status')
   // 现在失败的形状与空列表不同：`accounts` 为 null（未知），并带上失败原因。
   const response = await handleApi(get('/status'), deps({ accounts: async () => { throw new Error('credential scan failed') } }))
   check('a failed account scan is not fatal: ok:true, region/port/modelCount intact', response.body['ok'] === true && response.body['region'] === 'cn' && response.body['port'] === 7864 && response.body['modelCount'] === 7, JSON.stringify(response.body))
-  check('...the credential summary survives the partial failure', (response.body['credential'] as Record<string, unknown>)['userId'] === '100000000000000', JSON.stringify(response.body['credential']))
+  check('...the credential summary survives the partial failure', (response.body['credential'] as Record<string, unknown>)['userId'] === '357806796716699', JSON.stringify(response.body['credential']))
   check('...but accounts is null, NOT an empty list (unknown ≠ none)', response.body['accounts'] === null && !Array.isArray(response.body['accounts']), JSON.stringify(response.body['accounts']))
   check('...and the reason is carried, so the card can say why', response.body['accountsError'] === 'credential scan failed', JSON.stringify(response.body['accountsError']))
 }

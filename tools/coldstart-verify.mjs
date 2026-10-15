@@ -99,7 +99,20 @@ const TRACE = join(OWN_DIR, 'boot.log')
 const TOKEN_FILE = join(OWN_DIR, 'cn-shim-token.json')
 const STATE_FILE = join(OWN_DIR, 'state.json')
 const LEDGER = join(SCRATCH, 'coldstart-pids.json')
-const DSH_CMD = '<dsh-cli>'
+/**
+ * The DSH CLI to boot. Explicit override first, else the copy shipped beside the
+ * Node that DSH itself runs on, else `dsh` from PATH — so no machine is named.
+ */
+function dshCli() {
+  const explicit = process.env['DSH_CLI'] ?? process.env['DSH_CMD']
+  if (typeof explicit === 'string' && explicit !== '') return explicit
+  const name = process.platform === 'win32' ? 'dsh.cmd' : 'dsh'
+  // process.execPath is <install>\resources\runtime\primary-runtime\dependencies\node\bin\node.exe
+  const resources = resolve(dirname(process.execPath), '..', '..', '..', '..', '..')
+  const derived = join(resources, 'runtime', 'cli', 'bin', name)
+  return existsSync(derived) ? derived : name
+}
+const DSH_CMD = dshCli()
 const COMSPEC = process.env['ComSpec'] ?? 'cmd.exe'
 
 // ---------- reporting ----------
