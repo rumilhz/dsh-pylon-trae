@@ -1389,10 +1389,15 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
      */
     const nameSync: SeedNameReport | undefined = 'nameSync' in outcome ? outcome.nameSync : undefined
     if (nameSync !== undefined) {
+      const addedModels = outcome.kind === 'rebuilt' ? outcome.addedModels.length : 0
       if (nameSync.state === 'off') {
         trace('名字: 同步已关闭（syncNamesOnBoot=false）—— 条目里的名字一律不动')
       } else if (nameSync.renamed.length > 0) {
         trace(`名字: 已更新 ${nameSync.renamed.length} 行的显示名（${nameSync.renamed.slice(0, 8).map((change) => change.id).join('、')}${nameSync.renamed.length > 8 ? '…' : ''}）—— 只改 name 字段，其余字段与行顺序未动`)
+      } else if (outcome.kind === 'created') {
+        trace(`名字: 条目是本次新建的，${outcome.modelCount} 行都用了目录算出的显示名（不是各自 id）`)
+      } else if (addedModels > 0) {
+        trace(`名字: 新增的 ${addedModels} 行自带目录算出的显示名；已有行未改动`)
       } else {
         trace('名字: 与目录算出的显示名一致 —— 未改动')
       }
