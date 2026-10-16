@@ -39,6 +39,10 @@ const DOCTOR = process.argv.includes('--doctor')
 const SUITES = [
   ['entry loads + Config validates', 'check-entry.ts', []],
   ['write path (create/present/refresh/rollback)', 'test-seed.ts', []],
+  // The credential store + boot reconciliation: the green dot's ordering rule (the
+  // value goes into `$DSH_HOME/.credentials.yaml` BEFORE the entry names it), token
+  // rotation, and "only add" on boot. Offline, all writes inside a temp home.
+  ...(existsSync(join(HERE, 'test-credentials.ts')) ? [['credential store + boot reconciliation (offline)', 'test-credentials.ts', []]] : []),
   ['credential + paths (offline)', 'probe-m1.ts', ['--no-network']],
   ...(existsSync(join(HERE, 'test-api.ts')) ? [['api handlers (offline)', 'test-api.ts', []]] : []),
   // The credential's own expiry verdict and its refresh contract: no network (the

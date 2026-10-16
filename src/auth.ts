@@ -32,9 +32,10 @@
  * outside that directory outright, so a future edit cannot quietly break it.
  */
 import { createDecipheriv, createHash, randomBytes, sign } from 'node:crypto'
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { BACKUP_INFIX, DEFAULT_KEEP_BACKUPS, backupDir, dshHome } from './guard.ts'
 import { SALT_A, SALT_B, SALT_C, SALT_D, TRAE_AUTH_STORAGE_KEY } from './format.ts'
 import { regionOfEdition, type TraeEdition, type TraeRegion, type TraeStorageCandidate } from './paths.ts'
 
@@ -1053,5 +1054,538 @@ export async function refreshCredentialIntoStore(
       storePath,
       persisted: false
     }
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * 4. The HARNESS credential document ($DSH_HOME/.credentials.yaml)
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The harness's own credential store, seen from this plugin.
+ *
+ * Why this plugin touches it at all: the Models page shows a GREEN dot beside a
+ * provider name when the profile entry names a credential reference
+ * (`apiKeyEnv`) and `credentials.describe(ref).configured === true`
+ * (`dsh-client-ui-settings-models/lib/client.js:2158`), and a RED dot when it
+ * names one that resolves to nothing (`:2159`). Red is not cosmetic — the route
+ * then dies at request time with `MISSING_CREDENTIAL`
+ * (`dsh-llm-pi-ai/lib/index.js:2564-2569`). So a green dot may only ever be
+ * written AFTER the value it promises is really in the store; that ordering is
+ * enforced by the caller (`ensureCredentialRef` runs first, and `seed.ts` writes
+ * `apiKeyEnv` only from its verified answer).
+ *
+ * ## The document's real shape (measured 2026-10-16, this machine)
+ *
+ * ```text
+ * version: 1
+ * records:
+ *   <scope>/<id>: { kind: grant, payload: … }      # OAuth grants, untouched here
+ * refs:
+ *   DEEPSEEK_API_KEY: sk-…                          # plain, 2-space indent
+ * ```
+ *
+ * `dsh-credentials-local` parses it strictly (unknown top-level key, unversioned
+ * root, a non-mapping section or an empty value are all REJECTED), so this module
+ * reads it as strictly as the provider does rather than "well enough".
+ *
+ * ## The write discipline (same as every other write in this plugin)
+ *
+ * The actual `set` is delegated to the credentials service, which holds the
+ * cross-process writer lock and patches only the one key
+ * (`dsh-credentials-local/lib/index.js:604-629`, `renderRef`). That is where the
+ * safety does NOT end: a snapshot of the file is taken OUTSIDE every profile
+ * first, the file is re-read from disk afterwards, and {@link judgeCredentialsWrite}
+ * demands that our key is there WITH the value we asked for, that no other key
+ * appeared, changed or vanished, and that everything outside the `refs` body is
+ * byte-identical. Any failure restores the snapshot wholesale — because "the
+ * write returned" and "the other keys are still there" are two different facts,
+ * which is the same lesson `guard.ts` records for the profile patch.
+ */
+export const CREDENTIALS_FILENAME = '.credentials.yaml'
+
+/** The only shape this plugin will write into. Any other version is left alone. */
+export const CREDENTIALS_DOCUMENT_VERSION = 1
+
+/** How many backups of one credentials document are kept (mirrors guard.ts). */
+export const DEFAULT_KEEP_CREDENTIAL_BACKUPS = DEFAULT_KEEP_BACKUPS
+
+/** A credential reference name, exactly the grammar the seam enforces. */
+const CREDENTIAL_REF_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** `refs:` at column 0 — the section header, with an optional comment. */
+const REFS_HEADER_RE = /^refs:[ \t]*(#.*)?$/
+/** One `  NAME: value` line inside the refs section. */
+const REF_LINE_RE = /^([ \t]+)([A-Za-z_][A-Za-z0-9_]*):[ \t]*(.*)$/
+/** A comment line inside the section. */
+const COMMENT_RE = /^[ \t]*#/
+
+/** Where the harness keeps its credential document. */
+export function credentialsDocumentPath(home: string = dshHome()): string {
+  return join(home, CREDENTIALS_FILENAME)
+}
+
+/**
+ * One scalar value out of a YAML line, or `undefined` when this module cannot
+ * prove what the bytes mean.
+ *
+ * Deliberately narrow: the store writes plain base64url/`sk-…` scalars, and the
+ * one case where the YAML writer quotes a value is a spelling that would
+ * otherwise re-read as a number or boolean (`"123"`). Quoted, plain and
+ * comment-suffixed forms are admitted; every block scalar, anchor, alias, flow
+ * collection and tag is REFUSED, because a value this module cannot read back
+ * verbatim must never be judged "unchanged" by a comparison.
+ */
+export function parseCredentialScalar(raw: string): string | undefined {
+  const text = raw.trim()
+  if (text === '') return undefined
+  if (/^[|>&*!{[]/.test(text)) return undefined
+  if (text.startsWith("'")) {
+    if (!text.endsWith("'") || text.length < 2) return undefined
+    return text.slice(1, -1).replace(/''/g, "'")
+  }
+  if (text.startsWith('"')) {
+    try {
+      const parsed: unknown = JSON.parse(text)
+      return typeof parsed === 'string' ? parsed : undefined
+    } catch {
+      return undefined
+    }
+  }
+  const hash = text.indexOf(' #')
+  return hash === -1 ? text : text.slice(0, hash).trim()
+}
+
+/** What this module read out of the credentials document. */
+export interface CredentialsDocument {
+  path: string
+  /** The document's exact bytes, or `''` when the file is absent. */
+  text: string
+  /** Whether the file exists at all — the difference between "create" and "edit". */
+  exists: boolean
+  /** `refs` entries, in document order. */
+  refs: Map<string, string>
+  /**
+   * The document with the whole `refs` BODY (and its header) replaced by one
+   * marker line. Two documents with equal markers hold the same records,
+   * comments, top-level keys and formatting — everything this plugin must not
+   * disturb — regardless of which references they hold.
+   */
+  outsideRefs: string
+  version: number | undefined
+}
+
+export interface CredentialsReadFailure {
+  /** One line naming what could not be read. Never contains a value. */
+  detail: string
+}
+
+/**
+ * Read the credentials document, strictly.
+ *
+ * Returns a failure — never a guess — for anything this module cannot account
+ * for: an unversioned root, a version it does not know, a line inside `refs` it
+ * cannot parse into name + scalar. `dsh-credentials-local` would refuse such a
+ * file too, and a plugin that "best-effort" parsed it could then compare two
+ * different documents and call them equal.
+ */
+export function readCredentialsDocument(text: string, path: string): CredentialsDocument | CredentialsReadFailure {
+  const lines = text.split(/\r?\n/)
+  const refs = new Map<string, string>()
+  const outside: string[] = []
+  let inRefs = false
+  let version: number | undefined
+  for (const [index, line] of lines.entries()) {
+    if (!inRefs && REFS_HEADER_RE.test(line)) {
+      inRefs = true
+      outside.push('<<refs>>')
+      continue
+    }
+    if (inRefs) {
+      if (line.trim() === '' || COMMENT_RE.test(line)) continue
+      const match = REF_LINE_RE.exec(line)
+      if (match === null) {
+        // A dedent ends the section; anything else inside it is a shape we do not write.
+        if (/^[ \t]/.test(line)) return { detail: `第 ${index + 1} 行在 refs 段内但不是「名字: 值」—— 拒绝解析（不猜）` }
+        inRefs = false
+      } else {
+        const name = match[2] ?? ''
+        const value = parseCredentialScalar(match[3] ?? '')
+        if (!CREDENTIAL_REF_RE.test(name)) return { detail: `第 ${index + 1} 行的 refs 名字不合规：拒绝解析` }
+        if (value === undefined) return { detail: `第 ${index + 1} 行的 refs 值不是本模块能逐字读回的标量：拒绝解析` }
+        if (refs.has(name)) return { detail: `第 ${index + 1} 行重复定义了 ${name}：拒绝解析` }
+        refs.set(name, value)
+      }
+    }
+    if (!inRefs) {
+      outside.push(line)
+      const versionMatch = /^version:[ \t]*(\S+)[ \t]*$/.exec(line)
+      if (versionMatch !== null) {
+        const parsed = Number(versionMatch[1])
+        version = Number.isInteger(parsed) ? parsed : undefined
+      }
+    }
+  }
+  if (version !== undefined && version !== CREDENTIALS_DOCUMENT_VERSION) {
+    return { detail: `文档声明 version ${String(version)}，本插件只写 version ${CREDENTIALS_DOCUMENT_VERSION}` }
+  }
+  return { path, text, exists: text !== '', refs, outsideRefs: outside.join('\n'), version }
+}
+
+/** Narrow a read result. */
+export function isCredentialsReadFailure(value: CredentialsDocument | CredentialsReadFailure): value is CredentialsReadFailure {
+  return 'detail' in value
+}
+
+/** `20261016-221530`: fixed width, so name order is time order (see guard.ts). */
+function credentialBackupStamp(at: Date): string {
+  const p = (n: number): string => String(n).padStart(2, '0')
+  return `${at.getFullYear()}${p(at.getMonth() + 1)}${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`
+}
+
+/** Every backup of the credentials document, oldest name first. */
+export function listCredentialBackups(home: string = dshHome()): string[] {
+  const dir = backupDir(home)
+  if (!existsSync(dir)) return []
+  const prefix = `${CREDENTIALS_FILENAME}${BACKUP_INFIX}`
+  return readdirSync(dir)
+    .filter((name) => name.startsWith(prefix))
+    .sort()
+    .map((name) => join(dir, name))
+}
+
+/** Keep only the newest `keep` backups of the credentials document. */
+export function pruneCredentialBackups(keep = DEFAULT_KEEP_CREDENTIAL_BACKUPS, home: string = dshHome()): number {
+  if (!Number.isFinite(keep) || keep <= 0) return 0
+  try {
+    const names = listCredentialBackups(home)
+    let removed = 0
+    for (const path of names.slice(0, Math.max(0, names.length - keep))) {
+      try {
+        rmSync(path, { force: true })
+        removed += 1
+      } catch {
+        // one undeletable file must not stop the rest
+      }
+    }
+    return removed
+  } catch {
+    return 0
+  }
+}
+
+/** The pre-write state of the credentials document, with its escape hatch. */
+export interface CredentialsSnapshot {
+  path: string
+  /** `undefined` when the file could not be read as this plugin understands it. */
+  before?: CredentialsDocument
+  /** Why there is nothing to compare against; the write is refused when set. */
+  unsupported?: string
+  /** A copy OUTSIDE every profile, or `undefined` when the file did not exist. */
+  backupPath?: string
+}
+
+/**
+ * Read the credentials document from disk, strictly, without copying anything.
+ *
+ * The read half exists on its own because the DECISION ("do we need to write?")
+ * must not cost a file copy: a boot that finds the value already in place has to
+ * be able to walk away without touching the disk at all, and a backup taken for a
+ * write that never happens would grow this plugin's backup directory on every
+ * start — the exact "a directory that only grows" shape `guard.ts` documents.
+ */
+export function readCredentials(home: string = dshHome()): CredentialsDocument | CredentialsReadFailure {
+  const path = credentialsDocumentPath(home)
+  let text = ''
+  try {
+    text = readFileSync(path, 'utf8')
+  } catch {
+    text = ''
+  }
+  return readCredentialsDocument(text, path)
+}
+
+/**
+ * Copy the credentials document out of the home before touching it.
+ *
+ * The backup lives in the same directory as the profile-patch backups
+ * (`guard.ts`'s {@link backupDir}) — outside every profile, and pruned by name
+ * so this directory keeps cleaning up only after its own files. A file that
+ * cannot be parsed gets NO backup and NO write: copying something we do not
+ * understand would only make the failure later and quieter.
+ */
+export function snapshotCredentials(home: string = dshHome(), at: Date = new Date()): CredentialsSnapshot {
+  const path = credentialsDocumentPath(home)
+  const parsed = readCredentials(home)
+  if (isCredentialsReadFailure(parsed)) return { path, unsupported: parsed.detail }
+  const snapshot: CredentialsSnapshot = { path, before: parsed }
+  if (!parsed.exists) return snapshot
+  try {
+    const dir = backupDir(home)
+    mkdirSync(dir, { recursive: true })
+    const backupPath = join(dir, `${basename(path)}${BACKUP_INFIX}${credentialBackupStamp(at)}-${parsed.refs.size}refs.bak`)
+    copyFileSync(path, backupPath)
+    pruneCredentialBackups(DEFAULT_KEEP_CREDENTIAL_BACKUPS, home)
+    snapshot.backupPath = backupPath
+  } catch (error) {
+    // No backup ⇒ no verified way back ⇒ the caller must not write. Reported as
+    // "unsupported" so there is exactly one refusal path to reason about.
+    return { path, unsupported: `无法把凭据文档备份到 profile 之外（${error instanceof Error ? error.message : String(error)}）—— 没有退路就不写` }
+  }
+  return snapshot
+}
+
+/** Put the file back exactly as it was: the copy, or absence. */
+export function restoreCredentials(snapshot: CredentialsSnapshot): void {
+  try {
+    if (snapshot.backupPath !== undefined && existsSync(snapshot.backupPath)) {
+      copyFileSync(snapshot.backupPath, snapshot.path)
+      return
+    }
+    if (snapshot.before !== undefined && !snapshot.before.exists) rmSync(snapshot.path, { force: true })
+  } catch {
+    // The rollback is the last resort; a failure here is reported by the caller's
+    // own reason line, not swallowed into a success.
+  }
+}
+
+export interface CredentialsVerdict {
+  ok: boolean
+  reasons: string[]
+}
+
+/**
+ * Judge one credential write by comparing the document before and after it.
+ * **Pure** — the file system and the clock stay outside, so the rules that are
+ * easiest to lose silently can be asserted directly in a unit test.
+ *
+ * Five rules, in the order they fail:
+ *   ① the document is still one this plugin can read — a write that produced an
+ *      unparseable file is the worst case, not a technicality;
+ *   ② our key is there, holding exactly the value we asked for;
+ *   ③ no reference appeared or vanished besides ours (a store that dropped a
+ *      `refs` entry would silently un-authenticate another provider);
+ *   ④ every other reference still holds the same value, byte for byte;
+ *   ⑤ everything outside the `refs` body is byte-identical — records, comments,
+ *      top-level keys and formatting included.
+ *
+ * Rules ③-⑤ are what make this a "only ever adds or edits our own key" check
+ * rather than a promise: the plugin did not write the other keys, so only a
+ * comparison can prove it did not lose them.
+ *
+ * ## The one case where ③-⑤ do not apply: there was no document
+ *
+ * On a machine that has never stored a credential, `$DSH_HOME/.credentials.yaml`
+ * does not exist and this write CREATES it — so "everything outside refs is
+ * byte-identical" would compare a document against nothing and reject exactly the
+ * case this feature exists for. Loss needs a prior state to lose FROM, so with
+ * `before.exists === false` the contract is readability (①) plus our key holding
+ * our value (②), and nothing else. Another writer creating its own key in the
+ * same file at the same moment is not damage either, and must not fail our write.
+ */
+export function judgeCredentialsWrite(
+  before: CredentialsDocument,
+  afterText: string,
+  ref: string,
+  expectedValue: string
+): CredentialsVerdict {
+  const parsed = readCredentialsDocument(afterText, before.path)
+  if (isCredentialsReadFailure(parsed)) return { ok: false, reasons: [`写入后的凭据文档读不回来：${parsed.detail}`] }
+  const after = parsed
+  const reasons: string[] = []
+  const actual = after.refs.get(ref)
+  if (actual !== expectedValue) {
+    reasons.push(actual === undefined ? `${ref} 不在写入后的 refs 里（这次写入没有落地）` : `${ref} 的值不是我们写入的那个`)
+  }
+  if (!before.exists) return reasons.length === 0 ? { ok: true, reasons: [] } : { ok: false, reasons }
+  for (const key of after.refs.keys()) {
+    if (key !== ref && !before.refs.has(key)) reasons.push(`写入多出了别的键：${key}`)
+  }
+  for (const [key, value] of before.refs) {
+    if (key === ref) continue
+    const still = after.refs.get(key)
+    if (still === undefined) reasons.push(`写入丢掉了别的键：${key}`)
+    else if (still !== value) reasons.push(`写入改了别的键的值：${key}`)
+  }
+  if (after.outsideRefs !== before.outsideRefs) reasons.push('refs 段之外的内容变了（records/注释/顶层键必须一字不动）')
+  return reasons.length === 0 ? { ok: true, reasons: [] } : { ok: false, reasons }
+}
+
+/**
+ * The slice of the harness credentials service this module uses.
+ *
+ * Typed structurally on purpose: the service lives inside `app.asar` and this
+ * plugin has no dependency on it. `set` is the write half
+ * (`dsh-credentials-local`, id `credentials`, mounted by `dsh-base`); `resolve`
+ * is used only as a second opinion.
+ */
+export interface CredentialStoreFace {
+  resolve?: (ref: string) => Promise<{ value?: string } | undefined> | { value?: string } | undefined
+  describe?: (ref: string) => Promise<{ configured?: boolean } | undefined> | { configured?: boolean } | undefined
+  set?: (ref: string, value: string) => Promise<unknown>
+}
+
+export type EnsureCredentialStatus =
+  /** The store already held exactly this value: not one byte written. */
+  | 'present'
+  /** We wrote it, verified it, and the rest of the document is untouched. */
+  | 'written'
+  /** The launching environment supplies this reference; writing would be shadowed. */
+  | 'env'
+  /** No credentials service in this composition — nothing to write to. */
+  | 'no-service'
+  /** The document is missing, unreadable or not a shape we write. */
+  | 'unreadable'
+  /** The store refused, or the value did not land. Nothing changed. */
+  | 'failed'
+  /** The write changed something it must not have; the document was restored. */
+  | 'rolled-back'
+
+export interface EnsureCredentialResult {
+  status: EnsureCredentialStatus
+  ref: string
+  /** One line for `boot.log`. Never contains a value. */
+  detail: string
+  /** Whether the document was modified (only `written` is true). */
+  wrote: boolean
+  backupPath?: string
+  /** Independent read-back of the file after a write. */
+  verified?: boolean
+}
+
+/**
+ * Make sure `ref` holds `value` in the harness credential document — and prove
+ * it, in that order.
+ *
+ * The four decisions, each one a case that would otherwise produce the red dot:
+ *
+ *   · **the environment wins.** `dsh-credentials-local` resolves an inherited
+ *     environment variable ABOVE the file and refuses to write a shadowed
+ *     reference (`assertUnshadowed`). A reference the launch environment already
+ *     supplies is therefore green WITHOUT this write, and attempting it would
+ *     only produce a refusal — reported as `env`, not as a failure.
+ *   · **same value ⇒ no write.** Not "write the same bytes again": a file whose
+ *     mtime changes on every boot is a file whose watcher keeps waking up, and
+ *     the credential document is shared with every other provider.
+ *   · **the write is verified from DISK**, not from the store's return value.
+ *   · **anything unexpected is restored wholesale** and reported as a failure, so
+ *     the caller refuses to write `apiKeyEnv` and the route keeps the
+ *     header-only authentication it had before.
+ *
+ * @param options.store - the `credentials` service, or `undefined` when absent.
+ * @param options.ref - the credential reference name (e.g. `TRAE_API_KEY`).
+ * @param options.value - the secret to store. Never logged, never returned.
+ * @param options.home - the DSH home; injectable so tests can use a scratch one.
+ * @param options.env - the environment to check for a shadowing variable.
+ */
+export async function ensureCredentialRef(options: {
+  store: CredentialStoreFace | undefined
+  ref: string
+  value: string
+  home?: string
+  env?: Record<string, string | undefined>
+}): Promise<EnsureCredentialResult> {
+  const home = options.home ?? dshHome()
+  const env = options.env ?? process.env
+  const ref = options.ref
+  if (!CREDENTIAL_REF_RE.test(ref)) {
+    return { status: 'failed', ref, detail: `凭据引用名不合规（${JSON.stringify(ref)}），不写`, wrote: false }
+  }
+  if (typeof options.value !== 'string' || options.value === '') {
+    return { status: 'failed', ref, detail: '空值不写（凭据库拒绝空值，写了等于没有）', wrote: false }
+  }
+  const shadow = env[ref]
+  if (typeof shadow === 'string' && shadow !== '') {
+    return { status: 'env', ref, detail: `${ref} 由启动环境提供（长度 ${shadow.length}）—— 环境层高于文件层，写入会被遮蔽，因此不写`, wrote: false }
+  }
+  if (options.store === undefined || typeof options.store.set !== 'function') {
+    return { status: 'no-service', ref, detail: '这个组合里没有 credentials 服务（dsh-credentials-local），无处可写', wrote: false }
+  }
+  // The decision first, WITHOUT copying anything: a boot that finds the value in
+  // place must leave no trace at all (no backup, no mtime, nothing for a watcher
+  // to react to).
+  const read = readCredentials(home)
+  if (isCredentialsReadFailure(read)) {
+    return { status: 'unreadable', ref, detail: read.detail, wrote: false }
+  }
+  if (read.refs.get(ref) === options.value) {
+    return {
+      status: 'present',
+      ref,
+      detail: `${ref} 已在凭据库里且与当前 token 相同（长度 ${options.value.length}）—— 一个字节都不写`,
+      wrote: false,
+      verified: true
+    }
+  }
+  const snapshot = snapshotCredentials(home)
+  if (snapshot.before === undefined) {
+    return { status: 'unreadable', ref, detail: snapshot.unsupported ?? '凭据文档读不出来', wrote: false }
+  }
+  try {
+    await options.store.set(ref, options.value)
+  } catch (error) {
+    return { status: 'failed', ref, detail: `凭据服务拒绝写入：${error instanceof Error ? error.message : String(error)}`, wrote: false }
+  }
+  let after = ''
+  try {
+    after = readFileSync(snapshot.path, 'utf8')
+  } catch (error) {
+    restoreCredentials(snapshot)
+    return {
+      status: 'rolled-back',
+      ref,
+      detail: `写入后读不回来（${error instanceof Error ? error.message : String(error)}），已整份盖回`,
+      wrote: false,
+      ...(snapshot.backupPath === undefined ? {} : { backupPath: snapshot.backupPath })
+    }
+  }
+  const verdict = judgeCredentialsWrite(snapshot.before, after, ref, options.value)
+  if (!verdict.ok) {
+    restoreCredentials(snapshot)
+    return {
+      status: 'rolled-back',
+      ref,
+      detail: `${verdict.reasons.join('；')} —— 已整份盖回写入前的文档`,
+      wrote: false,
+      ...(snapshot.backupPath === undefined ? {} : { backupPath: snapshot.backupPath })
+    }
+  }
+  return {
+    status: 'written',
+    ref,
+    detail: `${ref} 已写入凭据库并由磁盘读回核对（其它键逐字节未变）`,
+    wrote: true,
+    verified: true,
+    ...(snapshot.backupPath === undefined ? {} : { backupPath: snapshot.backupPath })
+  }
+}
+
+/**
+ * The ONE place the "may this entry name that credential?" decision is made.
+ *
+ * Deliberately a function rather than an inline boolean at the call site, for the
+ * same reason `seed.ts` keeps its `kind === 'chat'` filter in one line: this
+ * decision is the difference between a green dot and a route that answers
+ * `MISSING_CREDENTIAL` forever (`dsh-llm-pi-ai/lib/index.js:2564-2569`), it is
+ * made from a value a human has no way to check by looking at the settings page,
+ * and there must be exactly one expression that can be wrong.
+ *
+ * `written` and `present` are the two states in which the store demonstrably
+ * holds the value; `env` means the launch environment supplies it, which
+ * `credentials.describe` reports as configured too — so a route naming it is
+ * green there as well. Every other status (no service, unreadable document,
+ * refused write, rolled-back write) leaves the entry header-authenticated only.
+ */
+export function verifiedCredentialRef(result: EnsureCredentialResult, ref: string): string | undefined {
+  return result.status === 'written' || result.status === 'present' || result.status === 'env' ? ref : undefined
+}
+
+/** Read one reference straight out of the document (durable truth, not the cache). */
+export function credentialsRefValue(home: string, ref: string): string | undefined {
+  try {
+    const parsed = readCredentialsDocument(readFileSync(credentialsDocumentPath(home), 'utf8'), credentialsDocumentPath(home))
+    return isCredentialsReadFailure(parsed) ? undefined : parsed.refs.get(ref)
+  } catch {
+    return undefined
   }
 }

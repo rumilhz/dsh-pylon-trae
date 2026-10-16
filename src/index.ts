@@ -44,6 +44,7 @@ import {
   credentialStorePath,
   describeCredentialExpiry,
   describeCredentialScan,
+  ensureCredentialRef,
   isExpired,
   preferValidStoredCredential,
   readStorageDevice,
@@ -51,6 +52,8 @@ import {
   refreshCredentialIntoStore,
   scanCredentials,
   tokenFingerprint,
+  verifiedCredentialRef,
+  type CredentialStoreFace,
   type TraeCredential,
   type TraeRefreshDevice
 } from './auth.ts'
@@ -61,8 +64,14 @@ import { ownCopyPath, traeStorageCandidates } from './paths.ts'
 import {
   buildProviderProfile,
   currentProviderModelIds,
+  mergeNames,
+  mergeOffered,
   pruneInternalModels,
   seedProvider,
+  syncProviderEntry,
+  TRAE_API_KEY_REF,
+  type ProviderProfile,
+  type SeedNameReport,
   type SeedOutcome,
   type SettingsServiceLike
 } from './seed.ts'
@@ -182,6 +191,31 @@ export interface TraeConfig {
   authFile: string
   /** `refresh` re-reads the live directory and adds only genuinely new models. */
   mode: 'auto' | 'refresh'
+  /**
+   * Keep the seeded entry current on every boot: append model ids the live
+   * directory offers that the entry has never held, and nothing else.
+   *
+   * Default TRUE, and that default is the whole point of the option existing:
+   * "configure it once and it maintains itself" only holds if a new Trae model
+   * arrives without the user remembering a button. The write is still
+   * "only add" — a model the user deleted was offered once and is never
+   * resurrected — and a boot with nothing new writes NOTHING (see
+   * `syncProviderEntry`), so leaving this on does not mean "the config changes
+   * on every start".
+   */
+  refreshOnBoot: boolean
+  /**
+   * Let a boot replace a display name this plugin wrote, and ONLY one it wrote.
+   *
+   * Default TRUE for the same reason `refreshOnBoot` defaults to true: an entry
+   * written before the name computation existed carries `name` equal to each
+   * row's id, and nothing else in the plugin would ever fix that — the user would
+   * never see the improvement. It is safe because it is memory-gated: a name with
+   * no record in our own `lastNames` is treated as the user's and left alone
+   * (see `src/seed.ts`'s `SeedNameReport`). Turn it off and the entry's names are
+   * never touched, exactly as before this option existed.
+   */
+  syncNamesOnBoot: boolean
 }
 
 export const DEFAULT_CONFIG: TraeConfig = {
@@ -191,7 +225,9 @@ export const DEFAULT_CONFIG: TraeConfig = {
   displayName: 'Trae',
   seed: true,
   authFile: '',
-  mode: 'auto'
+  mode: 'auto',
+  refreshOnBoot: true,
+  syncNamesOnBoot: true
 }
 
 /**
@@ -240,7 +276,9 @@ export const Config = {
         displayName: text('displayName', DEFAULT_CONFIG.displayName),
         seed: bool('seed', DEFAULT_CONFIG.seed),
         authFile: text('authFile', DEFAULT_CONFIG.authFile),
-        mode
+        mode,
+        refreshOnBoot: bool('refreshOnBoot', DEFAULT_CONFIG.refreshOnBoot),
+        syncNamesOnBoot: bool('syncNamesOnBoot', DEFAULT_CONFIG.syncNamesOnBoot)
       }
       return issues.length > 0 ? { issues } : { value }
     }
@@ -567,13 +605,26 @@ function describeOutcome(outcome: SeedOutcome): string {
   // the shape this plugin has been bitten by before, and "47 models（隐藏 32 个内部
   // 组件）" is the difference between a deliberate filter and a bug.
   const hidden = 'skippedInternal' in outcome && outcome.skippedInternal.length > 0 ? `（另有 ${outcome.skippedInternal.length} 个内部组件没写：${outcome.skippedInternal.slice(0, 8).join('、')}${outcome.skippedInternal.length > 8 ? '…' : ''}）` : ''
+  // Why a boot wrote nothing — the answer to "did it do its job?" without which
+  // `present` would read as "the plugin did nothing" instead of "nothing needed doing".
+  const why = (outcome: SeedOutcome): string =>
+    'tokenState' in outcome && outcome.tokenState !== undefined
+      ? `（token=${outcome.tokenState === 'same' ? '一致' : outcome.tokenState === 'rotated' ? '已轮换并同步' : '条目里原本没有'} apiKeyEnv=${outcome.apiKeyEnvState ?? 'skipped'}）`
+      : ''
+  // A rewrite of the user's file has to be enumerable, and a name rewrite is a
+  // rewrite: `rotated` already carries model rows untouched, so the count of
+  // renamed rows is what keeps that outcome from reading as "nothing happened".
+  const renamed = (outcome: SeedOutcome): string =>
+    'nameSync' in outcome && outcome.nameSync !== undefined && outcome.nameSync.renamed.length > 0 ? `、改名 ${outcome.nameSync.renamed.length} 行` : ''
   switch (outcome.kind) {
     case 'created':
       return `已生成可编辑供应商：${outcome.ns}.providers.<id>，${outcome.modelCount} 个模型${hidden}（备份 ${outcome.backupPath}）`
     case 'present':
-      return `供应商已存在，未改动（${outcome.ns}${outcome.modelCount === undefined ? '' : `，${outcome.modelCount} 个模型`}）${hidden}`
+      return `供应商已存在，未改动（${outcome.ns}${outcome.modelCount === undefined ? '' : `，${outcome.modelCount} 个模型`}）${why(outcome)}${hidden}`
+    case 'rotated':
+      return `条目已对账更新：token=${outcome.tokenState === 'same' ? '一致' : '已同步'}、apiKeyEnv=${outcome.apiKeyEnvState}，模型仍是用户那 ${outcome.keptModels} 个${renamed(outcome)}${hidden}（备份 ${outcome.backupPath}）`
     case 'rebuilt':
-      return `重建清单：保留 ${outcome.keptModels} 个，新增 ${outcome.addedModels.length} 个${hidden}`
+      return `重建清单：保留 ${outcome.keptModels} 个，新增 ${outcome.addedModels.length} 个${renamed(outcome)}${why(outcome)}${hidden}`
     case 'no-namespace':
       return `跳过写入：${outcome.detail}`
     case 'no-guard':
@@ -623,6 +674,35 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
 
   let credentialCache: TraeCredential | undefined
   let identityCache: TraeIdentity | undefined
+
+  /**
+   * The credential reference this boot PROVED is in the harness store, or
+   * `undefined` when it could not be proven.
+   *
+   * One variable, and every profile builder reads it — because the two halves of
+   * "the dot turns green" must never be able to disagree: a profile that names
+   * `apiKeyEnv` while the store does not hold it is the RED dot, and the route
+   * then dies with `MISSING_CREDENTIAL`
+   * (`dsh-llm-pi-ai/lib/index.js:2564-2569`). Set from the verified answer of
+   * `ensureCredentialRef` and from nothing else.
+   */
+  let verifiedApiKeyEnv: string | undefined
+
+  /**
+   * The harness credentials service, if this composition mounts one.
+   *
+   * `ctx.get` rather than `ctx.inject` on purpose: this is a READ of an optional
+   * service, and a plugin whose boot depends on an injected service that a
+   * composition does not provide simply never runs (which is the failure mode
+   * this plugin's own header warns about).
+   */
+  function credentialsFace(): CredentialStoreFace | undefined {
+    try {
+      return ctx.get('credentials') as CredentialStoreFace | undefined
+    } catch {
+      return undefined
+    }
+  }
 
   /**
    * A user-visible account problem, or `undefined` when there is nothing to say.
@@ -683,13 +763,23 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
 
   /**
    * Our own state, kept beside the token and NEVER inside the profile patch:
-   * which account to bill, and which model ids we have already offered (the
+   * which account to bill, which model ids we have already offered (the
    * tombstone set that stops "rebuild the list" from resurrecting models the
-   * user deleted).
+   * user deleted), and which display names we have written (so a name the USER
+   * typed can be told apart from one WE wrote, and is never overwritten).
    */
   interface PluginState {
     activeAccountId?: string
     lastOffered?: string[]
+    /**
+     * id → the display name this plugin wrote for that row, append-only.
+     *
+     * The exact counterpart of `lastOffered`, for the same reason: without a
+     * record, "the user renamed this row" and "we renamed this row last boot"
+     * are the same observation, and the only safe reading of that ambiguity
+     * would be "never improve a name" — which is the gap this exists to close.
+     */
+    lastNames?: Record<string, string>
   }
   const statePath = join(dshHome(), '.dsh-pylon-trae', 'state.json')
   const readState = (): PluginState => {
@@ -710,6 +800,45 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
     }
   }
   let state = readState()
+
+  /**
+   * Remember what was offered, WITHOUT ever forgetting what was offered before.
+   *
+   * The single place `lastOffered` grows, and it grows by union — see
+   * `mergeOffered` for why a replacement would make a user's deletion come back
+   * two restarts later. A boot whose memory already covers everything writes
+   * nothing at all, so "nothing changed" stays indistinguishable from "nothing
+   * happened".
+   */
+  const rememberOffered = (offered: readonly string[]): void => {
+    const merged = mergeOffered(state.lastOffered, offered)
+    if (merged.length === (state.lastOffered ?? []).length && merged.every((id, index) => id === (state.lastOffered ?? [])[index])) return
+    state = { ...state, lastOffered: merged }
+    writeState({ lastOffered: merged })
+  }
+
+  /**
+   * Remember the display names we wrote, WITHOUT ever forgetting a name we wrote
+   * before — `mergeNames` is a union with value updates, never a replacement.
+   *
+   * The names handed in come from `SeedOutcome.nameSync.names`, which exists ONLY
+   * on a write that really landed (or on a `present` outcome that had nothing to
+   * change). A refusal, a throw or a rollback carries no `names` at all, so the
+   * memory stays behind and the next boot retries the rename — "rather retry than
+   * believe a name that never reached the file".
+   *
+   * A boot that records nothing new writes NOTHING: same discipline as
+   * `rememberOffered`, so "nothing changed" also leaves no mtime behind.
+   */
+  const rememberNames = (names: Record<string, string> | undefined): void => {
+    if (names === undefined) return
+    const merged = mergeNames(state.lastNames, names)
+    const before = state.lastNames ?? {}
+    const keys = Object.keys(merged)
+    if (keys.length === Object.keys(before).length && keys.every((id) => before[id] === merged[id])) return
+    state = { ...state, lastNames: merged }
+    writeState({ lastNames: merged })
+  }
 
   // ── 宿主路由：设置卡片的数据通道 ──────────────────────────────────────────
   //
@@ -980,6 +1109,41 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
     if (created) ctx.logger.info(`dsh-pylon-trae: 已生成本插件自己的回环 token（不是 Trae 的 token）→ ${tokenPath}`)
     trace(`token: ${created ? 'created' : 'reused'} at ${tokenPath}`)
 
+    /**
+     * The green dot, made true BEFORE it is promised.
+     *
+     * The Models page lights the dot beside a provider name when the profile
+     * entry names a credential reference and `credentials.describe(ref)` says
+     * `configured: true` (`dsh-client-ui-settings-models/lib/client.js:2158`),
+     * and turns it RED when the reference resolves to nothing (`:2159`) — which
+     * is not cosmetic, because pi-ai then refuses every request with
+     * `MISSING_CREDENTIAL` (`dsh-llm-pi-ai/lib/index.js:2564-2569`). So this
+     * runs FIRST and its answer is the only thing that decides whether
+     * `apiKeyEnv` is written at all: the value stored is this process's own shim
+     * token, byte-identical to the `headers.Authorization` bearer, so naming the
+     * credential cannot change which bytes reach the shim — it only makes the
+     * fact visible. A failure here costs the dot and nothing else: the entry
+     * keeps authenticating through its header, exactly as it did before.
+     */
+    const credentialResult = await ensureCredentialRef({ store: credentialsFace(), ref: TRAE_API_KEY_REF, value: token })
+    verifiedApiKeyEnv = verifiedCredentialRef(credentialResult, TRAE_API_KEY_REF)
+    trace(`credential-store: ${credentialResult.status} — ${credentialResult.detail}${credentialResult.backupPath === undefined ? '' : `（备份 ${credentialResult.backupPath}）`}`)
+    if (verifiedApiKeyEnv === undefined) {
+      ctx.logger.warn(`dsh-pylon-trae: 没能确认凭据库里有 ${TRAE_API_KEY_REF}（${credentialResult.status}：${credentialResult.detail}）—— 本次不写 apiKeyEnv，条目继续只用 Authorization 头认证（宁可不绿，也不能变红打死路由）`)
+    } else if (credentialResult.wrote) {
+      ctx.logger.info(`dsh-pylon-trae: 已把回环 token 写进凭据库的 ${TRAE_API_KEY_REF}（供 pi-ai 解析；模型页那条 provider 会显示绿点）`)
+    }
+
+    /** One place where a provider profile is built, so `apiKeyEnv` cannot be forgotten. */
+    const profileFor = (baseUrl: string, list: readonly TraeModel[]): ProviderProfile =>
+      buildProviderProfile({
+        displayName: config.displayName,
+        baseUrl,
+        token,
+        models: list,
+        ...(verifiedApiKeyEnv === undefined ? {} : { apiKeyEnv: verifiedApiKeyEnv })
+      })
+
     let models: readonly TraeModel[] = FALLBACK_MODELS[region]
     try {
       const identityValue = readTraeIdentity(credentialCache.storagePath, credentialCache.edition)
@@ -1016,7 +1180,7 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
         trace(`refresh: directory failed — ${error instanceof Error ? error.message : String(error)}`)
       }
       const baseUrl = shim?.baseUrl() ?? `http://127.0.0.1:${config.port}`
-      const profile = buildProviderProfile({ displayName: config.displayName, baseUrl, token, models })
+      const profile = profileFor(baseUrl, models)
       const outcome = await seedProvider({
         settings: settingsFace,
         pluginName: name,
@@ -1027,9 +1191,12 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
         skippedInternal: partitionModels(models).internalIds
       })
       if (outcome.kind === 'rebuilt') {
-        state = { ...state, lastOffered: outcome.offeredModels }
-        writeState({ lastOffered: outcome.offeredModels })
+        rememberOffered(outcome.offeredModels)
       }
+      // A row appended by this button carries a name we computed, so it enters the
+      // name memory here: without the record, the next boot could not tell that
+      // name apart from one the user typed and would never improve it.
+      if ('nameSync' in outcome) rememberNames(outcome.nameSync?.names)
       trace(`refresh: ${outcome.kind} — ${describeOutcome(outcome)}`)
       return { outcome, modelCount: models.length }
     }
@@ -1152,23 +1319,96 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
     }
     trace(`guard: ${explainPatchLookup(name)}`)
     const catalogue = partitionModels(models)
-    const profile = buildProviderProfile({ displayName: config.displayName, baseUrl: shim.baseUrl(), token, models })
-    const outcome = await seedProvider({
+    /**
+     * The boot reconciliation, and NOT `seedProvider`.
+     *
+     * `seedProvider`'s answer for an entry that exists is `present` — correct for
+     * "should I write this from scratch?" and useless for the three things this
+     * plugin still owes the user on every start: a token that may have rotated
+     * (the entry would keep a stale bearer and 401), a credential reference that
+     * may be provable now (the green dot), and model ids Trae has added since the
+     * entry was written. See `syncProviderEntry` for the three properties that
+     * make touching an existing entry safe — surgical patch, nothing new ⇒
+     * nothing written, and the same guard as every other write.
+     *
+     * `mode: 'refresh'` keeps its old meaning ("always re-read the directory and
+     * add what is new") so an existing config that asked for it still gets it.
+     */
+    const profile = profileFor(shim.baseUrl(), models)
+    const outcome = await syncProviderEntry({
       settings: settingsFace,
       pluginName: name,
       providerName: config.providerId,
       profile,
-      ...(config.mode === 'refresh' ? { mode: 'refresh' as const } : {}),
+      token,
+      refreshOnBoot: config.refreshOnBoot || config.mode === 'refresh',
+      previouslyOffered: state.lastOffered ?? [],
+      // `!== false`, not `=== true`: the default is ON (see DEFAULT_CONFIG), so a
+      // caller that hands `apply` a partial config — a test harness, an older
+      // composition — gets the documented behaviour instead of the silent one.
+      syncNamesOnBoot: config.syncNamesOnBoot !== false,
+      lastNames: state.lastNames ?? {},
       skippedInternal: catalogue.internalIds
     })
     trace(`seed: ${outcome.kind} — ${describeOutcome(outcome)}`)
+    // Two lines, because they answer two different questions: "did the token the
+    // entry carries get fixed?" and "did a new model arrive?" — the first is
+    // ours to maintain, the second is the whole point of `refreshOnBoot`.
+    if ('tokenState' in outcome && outcome.tokenState !== undefined) {
+      trace(
+        outcome.tokenState === 'same'
+          ? 'token: 与条目里的一致 —— 一个字节都没写'
+          : `token: 轮换已同步（条目里原本是${outcome.tokenState === 'missing' ? '没有 Authorization 头' : '旧 token'}）—— 已在 guard 保护下更新条目并同步凭据库`
+      )
+    }
+    if ('apiKeyEnvState' in outcome && outcome.apiKeyEnvState !== undefined) {
+      trace(
+        outcome.apiKeyEnvState === 'written'
+          ? `apiKeyEnv: 已写入 ${TRAE_API_KEY_REF}（凭据库里已有对应值，绿点才会亮）`
+          : outcome.apiKeyEnvState === 'present'
+            ? `apiKeyEnv: ${TRAE_API_KEY_REF} 已在条目里，未改动`
+            : `apiKeyEnv: 本次不写（凭据库没能确认有 ${TRAE_API_KEY_REF}）—— 条目保持只用 Authorization 头`
+      )
+    }
+    if (config.refreshOnBoot || config.mode === 'refresh') {
+      const added = outcome.kind === 'rebuilt' ? outcome.addedModels : []
+      trace(
+        added.length > 0
+          ? `refresh-on-boot: 新增 ${added.length} 个（${added.join('、')}）—— 只增不删，用户删过的不会复活`
+          : 'refresh-on-boot: 无新增 —— 一个字节都没写'
+      )
+    }
+    /**
+     * 显示名对账：一行说"我们改了什么"，一行说"为什么有些行没动"。
+     *
+     * The second line is the one that matters when a user wonders why a row kept
+     * an odd name: "you changed it, so it is yours" has to be a fact in the log,
+     * not an inference. The first line names every id that was rewritten — a
+     * silent rewrite of the user's configuration is the accident this plugin
+     * exists to avoid.
+     */
+    const nameSync: SeedNameReport | undefined = 'nameSync' in outcome ? outcome.nameSync : undefined
+    if (nameSync !== undefined) {
+      if (nameSync.state === 'off') {
+        trace('名字: 同步已关闭（syncNamesOnBoot=false）—— 条目里的名字一律不动')
+      } else if (nameSync.renamed.length > 0) {
+        trace(`名字: 已更新 ${nameSync.renamed.length} 行的显示名（${nameSync.renamed.slice(0, 8).map((change) => change.id).join('、')}${nameSync.renamed.length > 8 ? '…' : ''}）—— 只改 name 字段，其余字段与行顺序未动`)
+      } else {
+        trace('名字: 与目录算出的显示名一致 —— 未改动')
+      }
+      if (nameSync.skippedUserNames.length > 0) {
+        trace(
+          `名字: ${nameSync.skippedUserNames.length} 行是你改过的名字，跳过（${nameSync.skippedUserNames.slice(0, 8).map((row) => row.id).join('、')}${nameSync.skippedUserNames.length > 8 ? '…' : ''}）—— 我们只改自己写过的名字`
+        )
+      }
+    }
     /**
      * 已存在的垃圾条目：只提示，不自动删。
      *
      * An entry written by an earlier version still lists the internal components,
-     * and `seedProvider` deliberately does not touch it (a user's entry is theirs).
-     * So the only thing this plugin owes the user at boot is the fact plus the way
-     * out — one line in `boot.log` and a button on the card (`POST
+     * and the reconciliation deliberately does not touch them (a user's entry is
+     * theirs). So the only thing this plugin owes the user at boot is the fact
+     * plus the way out — one line in `boot.log` and a button on the card (`POST
      * /models/prune-internal`). Deleting from user configuration without being
      * asked is the accident this plugin exists to avoid, not a convenience it
      * should take.
@@ -1180,9 +1420,16 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
     } else if (catalogue.internal.length > 0) {
       trace(`internal: 目录里 ${catalogue.internal.length} 个内部组件已隐藏、未写入条目（${catalogue.internalIds.slice(0, 8).join('、')}${catalogue.internalIds.length > 8 ? '…' : ''}）`)
     }
-    if (outcome.kind === 'created' || outcome.kind === 'present') {
-      state = { ...state, lastOffered: outcome.offeredModels }
-      writeState({ lastOffered: outcome.offeredModels })
+    // Every outcome that carries a tombstone set feeds it, because that set is
+    // the memory which makes "only add" mean what it says: a model the user
+    // deletes after this boot must not come back on a later one.
+    if ('offeredModels' in outcome) {
+      rememberOffered(outcome.offeredModels)
+    }
+    // And the name memory: ONLY the names a write really landed carries, so a
+    // rename that failed is retried next boot instead of being remembered as done.
+    if ('nameSync' in outcome) {
+      rememberNames(outcome.nameSync?.names)
     }
     if (outcome.kind === 'rolled-back' || outcome.kind === 'failed') ctx.logger.error(`dsh-pylon-trae: ${describeOutcome(outcome)}`)
     else ctx.logger.info(`dsh-pylon-trae: ${describeOutcome(outcome)}`)

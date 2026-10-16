@@ -488,6 +488,200 @@ export function partitionModels(models: readonly TraeModel[]): { chat: TraeModel
 }
 
 /**
+ * ═══════════ 下拉框里的 4 类坏显示名，与「显示名唯一化」═══════════
+ *
+ * 症状（委托方 2026-10-16 复核 `模型清单.md` 后逐个核过 47 行对话模型）：
+ *
+ *   ① **名字是 `-`**：`aquila` · `sagitta` —— Trae 的 `display_config.display_name`
+ *      就是一个横杠，用户在模型选择器里看到一行 `-`，不知道点的是什么；
+ *   ② **名字撒谎**：`Doubao-Seed-2.0-Code` 的显示名是 `Doubao-Seed-2.1-Turbo`
+ *      （**拥有**它的那条目录行 `solo_work_remote` 报出的线上名也是
+ *      `Doubao-Seed-2.1-Turbo__dev`），与真正的 `Doubao-Seed-2.1-Turbo` 撞名；
+ *   ③ **6 个 `-auto` 路由槽**：`doubao-for-auto` · `Doubao-Seed-2.0-Code-auto` ·
+ *      `glm-4.6-auto` · `glm-4.7-auto` · `minimax-m2-auto` · `minimax-m2.1-auto`。
+ *      它们是 Trae Auto 模式的路由端点（推断：命名规律 = 基础模型名 + `-auto`，线上名
+ *      一律 `__max`），显示名要么撞正牌（`glm-4.6-auto` 的显示名就是 `GLM-4.6`），
+ *      要么干脆是 id 本身（`doubao-for-auto`）。**不隐藏**（它们是真能调用的
+ *      config，隐藏比显示更糟），但必须让用户一眼看出这是自动模式端点；
+ *   ④ **7 组显示名完全撞车**（各 2 行）：`DeepSeek-V4-Flash` · `DeepSeek-V4-Pro` ·
+ *      `Seed-Code` · `Kimi-K2-0905` · `GLM-4.6` · `MiniMax-M2` · `MiniMax-M2.1` ——
+ *      下拉框里就是同名两行，用户没法分辨该点哪个。
+ *
+ * 出处：CN 网关 `POST /api/ide/v1/get_detail_param`（四个 function 各答一次），
+ * 2026-10-16 用只读脚本 `tools/report-models.ts --json` 原样读回：79 个 config_name
+ * → 对话模型 47 / 内部组件 32。这 47 行的 `display_name` 逐字冻结在
+ * `tools/test-catalog.ts` 的 `LIVE_CN_CHAT_ROWS` 里，本节不再重复那张表。
+ *
+ * ## 四条规则（显示名唯一化，**不是**黑名单）
+ *
+ * 判据只读两个已有字段：`id` 与 `display_config.display_name`（→ `TraeModel.name`），
+ * 外加 `directoryFunction` 作后缀。**没有任何 id 被写死在代码里** —— 名单会腐烂，
+ * 判据不会。
+ *
+ *   ① 名字缺失 / 只有标点或空白（`-` 也算）⇒ 用 **id**。id 至少是诚实的：
+ *      `aquila` 就显示成 `aquila`。
+ *   ② 同一批里出现重复显示名 ⇒ **每一个**同名条目都附上短功能标签（来自
+ *      `directoryFunction`：work / agent / chat / coder）。**不是**只改其中一个 ——
+ *      只改一个会让没被改的那个看起来像"正牌"。标签还不足以分开（同一个 function 的
+ *      两条争同一个名字）时，再补 id 片段，见 {@link uniquifyDisplayNames} 第三趟。
+ *   ③ id 与显示名**完全对不上**（显示名里不包含 id）⇒ 用 id。判据是「显示名必须能
+ *      证明它说的就是这个 id」，所以 `Seed-2.1-Turbo` 这类短名也会被换成
+ *      `Doubao-Seed-2.1-Turbo`：**宁可显示 id，也不显示一个核对不上的漂亮名字**。
+ *      `Doubao-Seed-2.0-Code` 正是被这条纠正的。
+ *   ④ `-auto` 结尾的 id 额外带 `（Auto · <function 标签>）`，例如
+ *      `glm-4.6-auto（Auto · coder）`、`doubao-for-auto（Auto · chat）`。
+ *
+ * ## 规则 ③ 为什么**不**去读线上 `model_name`（委托的原话里有这一半）
+ *
+ * 委托给的判据是「显示名里既不包含 id、也不包含线上 `model_name` 的主体」。前半句就是
+ * 上面那条；后半句在这份目录上**推不出任何新结论**，所以没有实现 —— 理由是两条：
+ *
+ *   ① **一个 chat 模型的线上名一定含它自己的 id。** 那正是 {@link classifyDirectoryEntry}
+ *      判它是 chat 的条件（`model_name` 里出现这个 config_name）；不满足的行是 internal，
+ *      根本不公布。所以"显示名包含线上名主体" ⇒ "显示名包含 id"，是前一条的子集。
+ *      `tools/test-catalog.ts` 把这 47 行的这个性质钉成了断言。
+ *   ② 真去读它反而会**替谎话背书**。`TraeModel` 的线上名是 first-wins 的，而
+ *      `Doubao-Seed-2.0-Code` 的**第一条**答案正是一个过期别名（实测 2026-10-16）：
+ *
+ *          solo_work_remote → Doubao-Seed-2.1-Turbo__dev   ← 先答的，也正是它显示名的来源
+ *          solo_coder       → Doubao-Seed-2.0-Code__max    ← 真正自报家门的那条
+ *
+ *      拿 first-wins 的线上名当依据，显示名恰好等于它，规则 ③ 就永远抓不到本委托点名
+ *      的那一条；要修就得再加一条"只认含自己 id 的那一行"的过滤 —— 而过滤完剩下的
+ *      信息量还是等于"含 id"。既然结论相同、代码更少、还没有那条陷阱，就只读 id。
+ *
+ * ## 幂等 / 确定性（结果会进 profile patch，必须可重放）
+ *
+ *   · 只依赖输入本身：`displayNameOf` 是逐行的纯函数；撞名分组按 {@link nameKey}
+ *     （大小写与分隔符不敏感）计数；补 id 片段用的是 id。没有随机数、没有时间、
+ *     没有"谁是列表第一个"的隐含依赖（计数与顺序无关）。
+ *   · 再跑一次结果相同：被改过的名字要么等于 id（含 id ⇒ 规则 ③ 直接通过），要么
+ *     带着 `（标签）` / `（Auto · 标签）` 尾巴（同样含 id ⇒ 通过），而它们已经互不
+ *     相同，所以第二趟既不会重命名、也不会再叠一层后缀；`-auto` 槽用
+ *     {@link AUTO_NAME_MARKER} 认出"我这条已经带过 Auto 标记"，不会叠加。
+ *   · 前置条件（两个调用点都保证）：同一批里 id 唯一 —— 目录按 config_name 去重
+ *     （{@link fetchDirectoryModels} 的 `byId`），写条目时 `buildProviderProfile`
+ *     也按 id 去重。
+ *
+ * ## 只动展示用的 `name`
+ *
+ * `id`（线上契约）永不改；`input` / `reasoningEfforts` / `multimodal` /
+ * `contextWindow` / `maxTokens` 一个字不动。内部组件（Trae IDE 自己的流程槽）
+ * **不参与改名**：它们默认根本不写进用户配置，`includeInternal: true` 这个逃生口
+ * 写出来的也仍是 Trae 自己给的名字。
+ *
+ * ## 在哪执行
+ *
+ * 唯一化是**整份名单的属性**，不是某一行的属性，所以它不可能在 `parseModel`（逐行）
+ * 里做；它在 {@link fetchDirectoryModels} 的出口执行 —— 目录在那里刚刚合并完，之后
+ * 每一处下游（写条目 / `GET /models/all` / `/v1/models` / 只读报表）读到的就已经是
+ * 最终名字。
+ */
+
+/** 目录 function → 短功能标签（撞名后缀与 Auto 标记都用它）。 */
+const DIRECTORY_FUNCTION_LABELS: Readonly<Record<string, string>> = {
+  solo_work_remote: 'work',
+  solo_agent_remote: 'agent',
+  chat_v3: 'chat',
+  solo_coder: 'coder'
+}
+
+/**
+ * The short tag a directory function contributes to a disambiguated display name.
+ * Total: an unknown or missing function name still yields a deterministic tag
+ * (its own name with the `solo_`/`_remote` scaffolding removed, else `unknown`).
+ */
+export function directoryFunctionLabel(directoryFunction: unknown): string {
+  if (typeof directoryFunction !== 'string' || directoryFunction.trim() === '') return 'unknown'
+  const known = DIRECTORY_FUNCTION_LABELS[directoryFunction]
+  if (known !== undefined) return known
+  const stripped = directoryFunction.replace(/^solo_/, '').replace(/_remote$/, '').trim()
+  return stripped === '' ? directoryFunction : stripped
+}
+
+/** Case- and separator-insensitive form used for every "are these the same name" test. */
+function nameKey(value: string): string {
+  return value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+}
+
+/** A name that carries no information: empty, whitespace, or nothing but punctuation (`-`, `—`, …). */
+const NAMELESS_DISPLAY_NAME = /^[\s\-–—_·.]+$/u
+/** An id shaped like an Auto-mode routing slot (`doubao-for-auto`, `minimax-m2.1-auto`, …). */
+const AUTO_ID_SUFFIX = /-auto$/i
+/** The marker this module appends, so a second run recognises its own work. */
+const AUTO_NAME_MARKER = /（Auto · [^）]+）$/u
+
+/**
+ * Rule ③ for ONE chat model: the honest display name, before uniqueness is decided.
+ *
+ * Pure and total: any shape is an answer, never a throw. An empty id has nothing to fall
+ * back to, so the raw name is returned unchanged (the caller drops such a row anyway).
+ */
+export function displayNameOf(model: TraeModel): string {
+  const id = typeof model.id === 'string' ? model.id : ''
+  const raw = typeof model.name === 'string' ? model.name.trim() : ''
+  if (id === '') return raw
+  if (raw === '' || NAMELESS_DISPLAY_NAME.test(raw)) return id
+  return nameKey(raw).includes(nameKey(id)) ? raw : id
+}
+
+/**
+ * Rules ② + ④ for a WHOLE roster: make every published conversation model's display
+ * name unique, and mark the Auto-mode slots.
+ *
+ * `internal` rows are returned untouched (they are not published by default, and the
+ * escape hatch that does publish them keeps Trae's own names). Returns a new array;
+ * rows whose name did not change keep their identity.
+ *
+ * Idempotent and deterministic — see the section comment above for the argument.
+ */
+export function uniquifyDisplayNames(models: readonly TraeModel[]): TraeModel[] {
+  const idOf = (model: TraeModel): string => (typeof model.id === 'string' ? model.id : '')
+  const countByName = (names: readonly (string | undefined)[]): Map<string, number> => {
+    const counts = new Map<string, number>()
+    models.forEach((model, index) => {
+      if (model.kind !== 'chat') return
+      const key = nameKey(names[index] ?? '')
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    })
+    return counts
+  }
+  // ① / ③ — the honest base name per chat row.
+  const honest = models.map((model) => (model.kind === 'chat' ? displayNameOf(model) : model.name))
+  const honestCounts = countByName(honest)
+  // ② / ④ — what this row has to say about itself, if anything.
+  const tags = models.map((model, index) => {
+    if (model.kind !== 'chat') return undefined
+    const base = honest[index] ?? model.name ?? ''
+    const shared = (honestCounts.get(nameKey(base)) ?? 1) > 1
+    const auto = AUTO_ID_SUFFIX.test(idOf(model))
+    if (!shared && !auto) return undefined
+    // Second run over an already-unique roster: my own marker is already there.
+    if (auto && AUTO_NAME_MARKER.test(base)) return undefined
+    return { auto, label: directoryFunctionLabel(model.directoryFunction) }
+  })
+  const render = (base: string, tag: { auto: boolean; label: string } | undefined, id: string, withId: boolean): string => {
+    if (tag === undefined && !withId) return base
+    const parts: string[] = []
+    if (tag !== undefined) parts.push(tag.auto ? `Auto · ${tag.label}` : tag.label)
+    if (withId) parts.push(id)
+    return `${base}（${parts.join(' · ')}）`
+  }
+  const planned = models.map((model, index) => (model.kind === 'chat' ? render(honest[index] ?? model.name ?? '', tags[index], idOf(model), false) : model.name))
+  // Third pass: the tag alone did not separate two rows (the same function claiming the
+  // same name twice) — put the id inside the same pair of brackets. Ids are unique by
+  // construction, so this can never collide again.
+  const plannedCounts = countByName(planned)
+  return models.map((model, index) => {
+    if (model.kind !== 'chat') return model
+    const base = honest[index] ?? model.name ?? ''
+    const stillShared = (plannedCounts.get(nameKey(planned[index] ?? '')) ?? 1) > 1
+    const finalName = render(base, tags[index], idOf(model), stillShared)
+    return finalName === model.name ? model : { ...model, name: finalName }
+  })
+}
+
+/**
  * Fill in fields a later directory row states and the first one did not.
  *
  * The same `config_name` is listed by several SOLO functions, and they disagree:
@@ -624,5 +818,9 @@ export async function fetchDirectoryModels(
       attempts.push({ fn, error: error instanceof Error ? error.message : String(error) })
     }
   }
-  return { models: [...byId.values()], attempts }
+  // The ONE place where the merged roster becomes what the user may see and call:
+  // the display names are made unique here, after the merge and before anything
+  // downstream (the provider entry, /models/all, /v1/models, the read-only report)
+  // can read a raw one. See the display-name section above.
+  return { models: uniquifyDisplayNames([...byId.values()]), attempts }
 }

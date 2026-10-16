@@ -39,12 +39,15 @@
  */
 import {
   classifyDirectoryEntry,
+  directoryFunctionLabel,
+  displayNameOf,
   FALLBACK_MODELS,
   fetchDirectoryModels,
   parseModel,
   partitionModels,
   TRAE_CHAT_USAGE,
   TRAE_INTERNAL_KINDS_DOC,
+  uniquifyDisplayNames,
   wireModelName,
   type TraeModel
 } from '../src/catalog.ts'
@@ -148,6 +151,70 @@ const LIVE_CN_CHAT: readonly LiveRow[] = [
 ]
 
 const LIVE_CN_ROWS: readonly LiveRow[] = [...LIVE_CN_INTERNAL, ...LIVE_CN_CHAT]
+
+/**
+ * The 47 conversation models EXACTLY as the CN gateway answered them on 2026-10-16,
+ * read back with `tools/report-models.ts --json` (read-only, no quota, no generation):
+ *
+ *   [config_name, display_config.display_name, [[function, model_detail_list[0].model_name], …]]
+ *
+ * `display_name` is the one the FIRST function answered with (display names are
+ * first-wins, exactly like the wire function), and every wire below is verbatim from
+ * that snapshot. `tools/report-models.ts` prints the same fields, so this table can be
+ * re-derived without a network call of its own — and the three rows the display-name
+ * rules turn on (`aquila` · `sagitta` with display name `-`, `Doubao-Seed-2.0-Code`
+ * claiming `Doubao-Seed-2.1-Turbo`, the seven duplicate display names) are all in here
+ * as MEASURED, not as invented examples.
+ */
+const LIVE_CN_CHAT_ROWS: readonly (readonly [string, string, readonly (readonly [string, string])[]])[] = [
+  ['aquila', '-', [['solo_work_remote', 'aquila__dev']]],
+  ['DeepSeek-V4-Flash', 'DeepSeek-V4-Flash', [['solo_work_remote', 'deepseek_v4_flash__dev'], ['solo_agent_remote', 'DeepSeek-V4-Flash__dev'], ['chat_v3', 'DeepSeek-V4-Flash__dev'], ['solo_coder', 'DeepSeek-V4-Flash__dev']]],
+  ['DeepSeek-V4-Flash-Official', 'DeepSeek-V4-Flash', [['solo_work_remote', 'DeepSeek-V4-Flash-Official__dev'], ['solo_agent_remote', 'DeepSeek-V4-Flash-Official__dev'], ['chat_v3', 'DeepSeek-V4-Flash-Official__dev']]],
+  ['DeepSeek-V4-Pro', 'DeepSeek-V4-Pro', [['solo_work_remote', 'deepseek_v4_pro__dev'], ['solo_agent_remote', 'DeepSeek-V4-Pro__dev'], ['chat_v3', 'DeepSeek-V4-Pro__dev'], ['solo_coder', 'DeepSeek-V4-Pro__dev']]],
+  ['DeepSeek-V4-Pro-Official', 'DeepSeek-V4-Pro', [['solo_work_remote', 'DeepSeek-V4-Pro-Official__dev'], ['solo_agent_remote', 'DeepSeek-V4-Pro-Official__dev'], ['chat_v3', 'DeepSeek-V4-Pro-Official__dev']]],
+  ['deepseek-v4.1-flash', 'DeepSeek-V4.1-Flash', [['solo_work_remote', 'deepseek-v4.1-flash__dev']]],
+  ['Doubao_1_6', 'Seed-Code', [['solo_agent_remote', 'Doubao_1_6__dev'], ['chat_v3', 'Doubao_1_6__dev'], ['solo_coder', 'Doubao_1_6__max']]],
+  ['doubao-for-auto', 'doubao-for-auto', [['chat_v3', 'doubao-for-auto__dev'], ['solo_coder', 'doubao-for-auto__max']]],
+  ['Doubao-Seed-2.0-Code', 'Doubao-Seed-2.1-Turbo', [['solo_work_remote', 'Doubao-Seed-2.1-Turbo__dev'], ['solo_coder', 'Doubao-Seed-2.0-Code__max']]],
+  ['Doubao-Seed-2.0-Code-auto', 'Doubao-Seed-2.0-Code', [['solo_coder', 'Doubao-Seed-2.0-Code-auto__max']]],
+  ['Doubao-Seed-2.1-Pro', 'Seed-2.1-Pro-0915', [['solo_work_remote', 'Doubao-Seed-2.1-Pro__dev'], ['solo_agent_remote', 'Doubao-Seed-2.1-Pro__dev'], ['chat_v3', 'Doubao-Seed-2.1-Pro__dev']]],
+  ['Doubao-Seed-2.1-Turbo', 'Seed-2.1-Turbo', [['solo_work_remote', 'Doubao-Seed-2.1-Turbo__dev'], ['solo_agent_remote', 'Doubao-Seed-2.1-Turbo__dev'], ['chat_v3', 'Doubao-Seed-2.1-Turbo__dev']]],
+  ['Doubao-Seed-Code', 'Seed-Code', [['solo_agent_remote', 'Doubao-Seed-Code__dev'], ['chat_v3', 'Doubao-Seed-Code__dev'], ['solo_coder', 'Doubao-Seed-Code__max']]],
+  ['Doubao-Seed-Evolving', 'Seed-Evolving', [['solo_work_remote', 'Doubao-Seed-Evolving__dev'], ['solo_agent_remote', 'Doubao-Seed-Evolving__dev']]],
+  ['glm-4.6', 'GLM-4.6', [['chat_v3', 'glm-4.6__dev'], ['solo_coder', 'glm-4.6__dev']]],
+  ['glm-4.6-auto', 'GLM-4.6', [['solo_coder', 'glm-4.6-auto__max']]],
+  ['glm-4.7', 'GLM-4.7', [['chat_v3', 'glm-4.7__dev'], ['solo_coder', 'glm-4.7__dev']]],
+  ['glm-4.7-auto', 'glm-4.7-auto', [['chat_v3', 'glm-4.7-auto__dev'], ['solo_coder', 'glm-4.7-auto__max']]],
+  ['glm-5', 'GLM-5', [['solo_work_remote', 'glm-5__dev'], ['solo_agent_remote', 'glm-5__dev'], ['chat_v3', 'glm-5__dev'], ['solo_coder', 'glm-5__dev']]],
+  ['glm-5-turbo', 'GLM-5-Turbo', [['solo_work_remote', 'glm-5-turbo__dev']]],
+  ['glm-5.1', 'GLM-5.1', [['solo_agent_remote', 'glm-5.1__dev'], ['chat_v3', 'glm-5.1__dev'], ['solo_coder', 'glm-5.1__dev']]],
+  ['glm-5.2', 'GLM-5.2', [['solo_work_remote', 'glm-5.2__dev'], ['solo_agent_remote', 'glm-5.2__dev'], ['chat_v3', 'glm-5.2__dev']]],
+  ['glm-5.3', 'GLM-5.3', [['solo_work_remote', 'glm-5.3__dev']]],
+  ['glm-5.3-flash', 'GLM-5.3-Flash', [['solo_work_remote', 'glm-5.3-flash__dev']]],
+  ['glm-5.3-flashx', 'GLM-5.3-FlashX', [['solo_work_remote', 'glm-5.3-flashx__dev']]],
+  ['glm-5v-turbo', 'GLM-5V-Turbo', [['solo_coder', 'glm-5v-turbo__dev']]],
+  ['kimi-k2', 'Kimi-K2-0905', [['chat_v3', 'kimi-k2__dev']]],
+  ['kimi-k2-0905', 'Kimi-K2-0905', [['solo_coder', 'kimi-k2-0905__dev']]],
+  ['kimi-k2.5', 'Kimi-K2.5', [['solo_coder', 'kimi-k2.5__dev']]],
+  ['kimi-k2.6', 'Kimi-K2.6', [['solo_work_remote', 'kimi-k2.6__dev'], ['solo_agent_remote', 'kimi-k2.6__dev'], ['solo_coder', 'kimi-k2.6__dev']]],
+  ['kimi-k2.7-code', 'Kimi-K2.7-Code', [['solo_work_remote', 'kimi-k2.7-code__dev'], ['solo_agent_remote', 'kimi-k2.7-code__dev'], ['chat_v3', 'kimi-k2.7-code__dev']]],
+  ['kimi-k3', 'Kimi-K3', [['solo_work_remote', 'kimi-k3__dev'], ['solo_agent_remote', 'kimi-k3__dev'], ['chat_v3', 'kimi-k3__dev']]],
+  ['mimo-v2.6-flash', 'MiMo-V2.6-Flash', [['solo_work_remote', 'mimo-v2.6-flash__dev']]],
+  ['mimo-v2.6-pro', 'MiMo-V2.6-Pro', [['solo_work_remote', 'mimo-v2.6-pro__dev']]],
+  ['minimax-m2', 'MiniMax-M2', [['chat_v3', 'minimax-m2__dev'], ['solo_coder', 'minimax-m2__dev']]],
+  ['minimax-m2-auto', 'MiniMax-M2', [['solo_coder', 'minimax-m2-auto__max']]],
+  ['minimax-m2.1', 'MiniMax-M2.1', [['chat_v3', 'minimax-m2.1__dev'], ['solo_coder', 'minimax-m2.1__dev']]],
+  ['minimax-m2.1-auto', 'MiniMax-M2.1', [['solo_coder', 'minimax-m2.1-auto__max']]],
+  ['minimax-m2.7', 'MiniMax-M2.7', [['solo_coder', 'minimax-m2.7__dev']]],
+  ['minimax-m3', 'MiniMax-M3', [['solo_work_remote', 'minimax-m3__dev'], ['solo_agent_remote', 'minimax-m3__dev'], ['chat_v3', 'minimax-m3__dev']]],
+  ['qwen-3.5', 'Qwen3.5-Plus', [['solo_agent_remote', 'qwen-3.5__dev'], ['chat_v3', 'qwen-3.5__dev'], ['solo_coder', 'qwen-3.5__dev']]],
+  ['qwen-3.6-plus', 'Qwen3.6-Plus', [['solo_coder', 'qwen-3.6-plus__dev']]],
+  ['qwen-3.7-plus', 'Qwen3.7-Plus', [['solo_work_remote', 'qwen-3.7-plus__dev'], ['solo_agent_remote', 'qwen-3.7-plus__dev'], ['chat_v3', 'qwen-3.7-plus__dev']]],
+  ['qwen3-coder', 'Qwen3-Coder-Next', [['chat_v3', 'openai_qwen3-coder-plus__dev']]],
+  ['qwen3.8-max', 'Qwen3.8-Max', [['solo_work_remote', 'qwen3.8-max__dev']]],
+  ['sagitta', '-', [['solo_work_remote', 'sagitta__dev']]],
+  ['step-5-preview', 'Step-5-Preview', [['solo_work_remote', 'step-5-preview__dev']]]
+]
 
 /** Build the entry shape the classifier reads, from one measured row. */
 function rowEntry(row: LiveRow): Record<string, unknown> {
@@ -439,6 +506,277 @@ console.log('\n[8] a stale/aliased row must not be able to hide a real model')
     const merged = await mergeDirectory(INTERNAL_ROSTER)
     check(`...so merging all ${INTERNAL_ROSTER.length} of them still yields internal`, merged.length === INTERNAL_ROSTER.length && merged.every((model) => model.kind === 'internal'), merged.filter((model) => model.kind === 'chat').map((model) => model.id).join(','))
     check('...and each one keeps a reason a human can read', merged.every((model) => typeof model.internalReason === 'string' && model.internalReason.length > 0))
+  }
+}
+
+/* ═══════ 9. 显示名唯一化 —— 用户在「模型」下拉框里真正读到的名字 ═══════ */
+//
+// The requester (2026-10-16) found four classes of bad display names in the dropdown:
+//   ① two rows named `-` (`aquila` · `sagitta`);
+//   ② one row whose name belongs to ANOTHER model (`Doubao-Seed-2.0-Code` says
+//      `Doubao-Seed-2.1-Turbo`);
+//   ③ six `-auto` routing slots that either collide with the real model or show their
+//      raw id;
+//   ④ seven display names that appear on two rows each.
+// Every check below runs on the measured 47 rows above, through the REAL fetch/merge
+// path — no invented sample carries one of the four defects. Two checks at the end use
+// hand-built rows, and say so: the tag-alone-still-collides branch and the wire-name
+// rescue have no representative in the live roster.
+console.log('\n[9] display names: the four defects, and the uniqueness rule that fixes them')
+{
+  /** Serve the measured rows through the real fetch path (fake transport, no network). */
+  async function fetchLiveChat(): Promise<TraeModel[]> {
+    const fetchImpl = (async (_url: unknown, init?: RequestInit): Promise<Response> => {
+      const fn = String((JSON.parse(String(init?.body)) as Record<string, unknown>)['function'])
+      const list: unknown[] = []
+      for (const [id, display, rows] of LIVE_CN_CHAT_ROWS) {
+        const wire = rows.find(([rowFn]) => rowFn === fn)?.[1]
+        if (wire === undefined) continue
+        list.push({ config_name: id, usage: TRAE_CHAT_USAGE, display_config: { display_name: display }, model_detail_list: [{ model_name: wire }] })
+      }
+      return new Response(JSON.stringify({ config_info_list: list }), { status: 200 })
+    }) as unknown as typeof fetch
+    const credential = { id: 't', edition: 'cn', region: 'cn', source: 'own', storagePath: '', userId: '0', expiresAtMs: 0, accessToken: 't' } as unknown as TraeCredential
+    const identity = { edition: 'cn', machineId: 'm', deviceId: 'd' } as unknown as TraeIdentity
+    return (await fetchDirectoryModels('cn', credential, identity, { fetchImpl })).models
+  }
+
+  const live = await fetchLiveChat()
+  const chat = live.filter((model) => model.kind === 'chat')
+  const modelOf = (id: string): TraeModel => {
+    const found = chat.find((model) => model.id === id)
+    if (found === undefined) throw new Error(`the measured roster lost ${id}`)
+    return found
+  }
+  const rawNameOf = (id: string): string => LIVE_CN_CHAT_ROWS.find((row) => row[0] === id)?.[1] ?? '(not measured)'
+  const dashOrBlank = (value: string): boolean => value.trim() === '' || /^[\s\-–—_·.]+$/u.test(value.trim())
+
+  check(`all ${LIVE_CN_CHAT_ROWS.length} measured conversation models survive the merge as chat`, chat.length === LIVE_CN_CHAT_ROWS.length && live.length === LIVE_CN_CHAT_ROWS.length, `${chat.length}/${live.length}`)
+  check('none of them is hidden by the naming rule', LIVE_CN_CHAT_ROWS.every((row) => chat.some((model) => model.id === row[0])))
+
+  /* ---- the ONE total assertion the requester asked for ---- */
+  {
+    const names = chat.map((model) => model.name)
+    const folded = names.map((name) => name.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ''))
+    check(`the ${names.length} final display names are pairwise distinct`, new Set(names).size === names.length, `${names.length - new Set(names).size} duplicate(s)`)
+    check('...and still pairwise distinct with case and separators folded away', new Set(folded).size === folded.length)
+    const bad = names.filter(dashOrBlank)
+    check('...and not one of them is blank, `-`, or punctuation only', bad.length === 0, JSON.stringify(bad))
+  }
+
+  /* ---- ① the two rows Trae left nameless ---- */
+  check('aquila\'s `-` became its own id', modelOf('aquila').name === 'aquila' && rawNameOf('aquila') === '-')
+  check('sagitta\'s `-` became its own id', modelOf('sagitta').name === 'sagitta' && rawNameOf('sagitta') === '-')
+
+  /* ---- ② the lying name ---- */
+  check(
+    'Doubao-Seed-2.0-Code no longer claims to be Doubao-Seed-2.1-Turbo',
+    modelOf('Doubao-Seed-2.0-Code').name === 'Doubao-Seed-2.0-Code' && rawNameOf('Doubao-Seed-2.0-Code') === 'Doubao-Seed-2.1-Turbo',
+    modelOf('Doubao-Seed-2.0-Code').name
+  )
+  check('...while the real Doubao-Seed-2.1-Turbo keeps its own row and name', modelOf('Doubao-Seed-2.1-Turbo').name === 'Doubao-Seed-2.1-Turbo')
+  check(
+    '...and the FIRST answer\'s stale alias does not save it (the rule reads the id, never the first-wins wire)',
+    (() => {
+      const row = LIVE_CN_CHAT_ROWS.find((entry) => entry[0] === 'Doubao-Seed-2.0-Code')!
+      const firstWire = row[2][0]?.[1] ?? ''
+      const ownWire = row[2].find(([, wire]) => wire.toLowerCase().includes('doubao-seed-2.0-code'))?.[1] ?? ''
+      const fold = (value: string): string => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+      // The lie would have been "confirmed" by the first answer's wire name …
+      return fold(row[1]).includes(fold(firstWire.replace(/__[A-Za-z0-9]+$/, ''))) && ownWire === 'Doubao-Seed-2.0-Code__max' && modelOf('Doubao-Seed-2.0-Code').name === 'Doubao-Seed-2.0-Code'
+    })(),
+    LIVE_CN_CHAT_ROWS.find((entry) => entry[0] === 'Doubao-Seed-2.0-Code')?.[2].map(([fn, wire]) => `${fn}:${wire}`).join(' · ')
+  )
+  check('...also the legacy `Doubao_1_6` no longer borrows Doubao-Seed-Code\'s name', modelOf('Doubao_1_6').name === 'Doubao_1_6' && rawNameOf('Doubao_1_6') === 'Seed-Code')
+
+  /* ---- ③ the six Auto-mode routing slots ---- */
+  {
+    const autoIds = LIVE_CN_CHAT_ROWS.map((row) => row[0]).filter((id) => /-auto$/i.test(id))
+    const unmarked = autoIds.filter((id) => !modelOf(id).name.includes('Auto'))
+    check(`all ${autoIds.length} measured -auto slots are still offered (never hidden)`, autoIds.length === 6 && autoIds.every((id) => chat.some((model) => model.id === id)), autoIds.join(','))
+    check('...and every one of them says "Auto" in the name a user reads', unmarked.length === 0, unmarked.join(','))
+    const partners: readonly (readonly [string, string])[] = [['glm-4.6-auto', 'glm-4.6'], ['glm-4.7-auto', 'glm-4.7'], ['minimax-m2-auto', 'minimax-m2'], ['minimax-m2.1-auto', 'minimax-m2.1'], ['doubao-for-auto', ''], ['Doubao-Seed-2.0-Code-auto', 'Doubao-Seed-2.0-Code']]
+    const collided = partners.filter(([auto, real]) => real !== '' && modelOf(auto).name === modelOf(real).name)
+    check('...so an -auto slot can never share a name with the real model again', collided.length === 0, collided.map(([auto]) => `${auto}=${modelOf(auto).name}`).join(' · '))
+    check('...and the marker carries the directory function it routes through', modelOf('glm-4.6-auto').name === 'glm-4.6-auto（Auto · coder）' && modelOf('doubao-for-auto').name === 'doubao-for-auto（Auto · chat）', `${modelOf('glm-4.6-auto').name} · ${modelOf('doubao-for-auto').name}`)
+  }
+
+  /* ---- ④ the seven duplicate display names ---- */
+  {
+    const groups = new Map<string, string[]>()
+    for (const [id, display] of LIVE_CN_CHAT_ROWS) groups.set(display, [...(groups.get(display) ?? []), id])
+    const collisions = [...groups.entries()].filter(([, ids]) => ids.length > 1)
+    const dashed = collisions.filter(([name]) => name === '-')
+    const named = collisions.filter(([name]) => name !== '-')
+    check(`the measurement really carries the 7 duplicate display names the requester counted (plus the two \`-\`)`, named.length === 7 && dashed.length === 1 && dashed[0]?.[1].length === 2, collisions.map(([name, ids]) => `${name}×${ids.length}`).join(' · '))
+    const split = named.filter(([, ids]) => new Set(ids.map((id) => modelOf(id).name)).size !== ids.length)
+    check('every one of those 7 groups ends up with pairwise different names', split.length === 0, split.map(([name]) => name).join(' · '))
+    // "Every same-named entry gets a suffix" — not "one of them does". Six of the seven
+    // groups are dissolved a step earlier by rule ③ (the liar becomes its own id), so the
+    // rows this actually applies to are the ones whose HONEST base name is still shared.
+    // The honest base is computed from the DIRECTORY name (`rawNameOf`), not from the
+    // already-uniquified name the fetch returns — otherwise the question is circular.
+    const honestBaseOf = (model: TraeModel): string => displayNameOf({ ...model, name: rawNameOf(model.id) })
+    const honestCounts = new Map<string, number>()
+    for (const model of chat) honestCounts.set(honestBaseOf(model), (honestCounts.get(honestBaseOf(model)) ?? 0) + 1)
+    const shared = chat.filter((model) => (honestCounts.get(honestBaseOf(model)) ?? 1) > 1)
+    check('...and where the honest base name is STILL shared, every such row carries a suffix (not just one of them)', shared.length === 2 && shared.every((model) => model.name !== honestBaseOf(model) && /（[^）]+）$/.test(model.name)), shared.map((model) => `${model.id}->${model.name}`).join(' · '))
+    check('...namely both Kimi rows, tagged with the function each one routes through', modelOf('kimi-k2').name === 'Kimi-K2-0905（chat）' && modelOf('kimi-k2-0905').name === 'Kimi-K2-0905（coder）')
+    check('the function tag comes from the directory function, not from a hand-written table', directoryFunctionLabel('solo_work_remote') === 'work' && directoryFunctionLabel('solo_agent_remote') === 'agent' && directoryFunctionLabel('chat_v3') === 'chat' && directoryFunctionLabel('solo_coder') === 'coder')
+  }
+
+  /* ---- ⑤ the frozen outcome: ids, the untouched rows, and the whole table ---- */
+  check('no id was changed by the naming rule', JSON.stringify(chat.map((model) => model.id).slice().sort()) === JSON.stringify(LIVE_CN_CHAT_ROWS.map((row) => row[0]).slice().sort()))
+  // Why rule ③ can stop at the id: every published conversation model has a row whose
+  // wire name contains its own id (that IS the `classifyDirectoryEntry` criterion), so
+  // "the display name contains the wire model's body" can never hold where "the display
+  // name contains the id" fails. Pinned as a property of the measurement, not assumed.
+  {
+    const fold = (value: string): string => value.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+    const notSelfIdentifying = LIVE_CN_CHAT_ROWS.filter((row) => !row[2].some(([, wire]) => fold(wire).includes(fold(row[0]))))
+    check('every published chat model has a row whose wire name contains its own id (the wire clause of rule ③ is therefore a subset of the id clause)', notSelfIdentifying.length === 0, notSelfIdentifying.map((row) => row[0]).join('、'))
+    const laundered = LIVE_CN_CHAT_ROWS.filter((row) => {
+      const bodies = row[2].map(([, wire]) => fold(wire.replace(/__[A-Za-z0-9]+$/, '')))
+      return bodies.some((body) => body !== '' && fold(row[1]).includes(body)) && !fold(row[1]).includes(fold(row[0]))
+    })
+    check('...and exactly ONE row would have been "confirmed" by a first-wins alias — the lying row itself (which is why the wire is not read)', laundered.length === 1 && laundered[0]?.[0] === 'Doubao-Seed-2.0-Code', laundered.map((row) => row[0]).join('、'))
+  }
+  {
+    const EXPECTED_FINAL_NAMES: readonly (readonly [string, string])[] = [
+      ['aquila', 'aquila'],
+      ['DeepSeek-V4-Flash', 'DeepSeek-V4-Flash'],
+      ['DeepSeek-V4-Flash-Official', 'DeepSeek-V4-Flash-Official'],
+      ['DeepSeek-V4-Pro', 'DeepSeek-V4-Pro'],
+      ['DeepSeek-V4-Pro-Official', 'DeepSeek-V4-Pro-Official'],
+      ['deepseek-v4.1-flash', 'DeepSeek-V4.1-Flash'],
+      ['Doubao_1_6', 'Doubao_1_6'],
+      ['doubao-for-auto', 'doubao-for-auto（Auto · chat）'],
+      ['Doubao-Seed-2.0-Code', 'Doubao-Seed-2.0-Code'],
+      ['Doubao-Seed-2.0-Code-auto', 'Doubao-Seed-2.0-Code-auto（Auto · coder）'],
+      ['Doubao-Seed-2.1-Pro', 'Doubao-Seed-2.1-Pro'],
+      ['Doubao-Seed-2.1-Turbo', 'Doubao-Seed-2.1-Turbo'],
+      ['Doubao-Seed-Code', 'Doubao-Seed-Code'],
+      ['Doubao-Seed-Evolving', 'Doubao-Seed-Evolving'],
+      ['glm-4.6', 'GLM-4.6'],
+      ['glm-4.6-auto', 'glm-4.6-auto（Auto · coder）'],
+      ['glm-4.7', 'GLM-4.7'],
+      ['glm-4.7-auto', 'glm-4.7-auto（Auto · chat）'],
+      ['glm-5', 'GLM-5'],
+      ['glm-5-turbo', 'GLM-5-Turbo'],
+      ['glm-5.1', 'GLM-5.1'],
+      ['glm-5.2', 'GLM-5.2'],
+      ['glm-5.3', 'GLM-5.3'],
+      ['glm-5.3-flash', 'GLM-5.3-Flash'],
+      ['glm-5.3-flashx', 'GLM-5.3-FlashX'],
+      ['glm-5v-turbo', 'GLM-5V-Turbo'],
+      ['kimi-k2', 'Kimi-K2-0905（chat）'],
+      ['kimi-k2-0905', 'Kimi-K2-0905（coder）'],
+      ['kimi-k2.5', 'Kimi-K2.5'],
+      ['kimi-k2.6', 'Kimi-K2.6'],
+      ['kimi-k2.7-code', 'Kimi-K2.7-Code'],
+      ['kimi-k3', 'Kimi-K3'],
+      ['mimo-v2.6-flash', 'MiMo-V2.6-Flash'],
+      ['mimo-v2.6-pro', 'MiMo-V2.6-Pro'],
+      ['minimax-m2', 'MiniMax-M2'],
+      ['minimax-m2-auto', 'minimax-m2-auto（Auto · coder）'],
+      ['minimax-m2.1', 'MiniMax-M2.1'],
+      ['minimax-m2.1-auto', 'minimax-m2.1-auto（Auto · coder）'],
+      ['minimax-m2.7', 'MiniMax-M2.7'],
+      ['minimax-m3', 'MiniMax-M3'],
+      ['qwen-3.5', 'Qwen3.5-Plus'],
+      ['qwen-3.6-plus', 'Qwen3.6-Plus'],
+      ['qwen-3.7-plus', 'Qwen3.7-Plus'],
+      ['qwen3-coder', 'Qwen3-Coder-Next'],
+      ['qwen3.8-max', 'Qwen3.8-Max'],
+      ['sagitta', 'sagitta'],
+      ['step-5-preview', 'Step-5-Preview']
+    ]
+    const actual = LIVE_CN_CHAT_ROWS.map((row) => [row[0], modelOf(row[0]).name] as const)
+    const wrong = actual.filter(([id, name], index) => EXPECTED_FINAL_NAMES[index]?.[0] !== id || EXPECTED_FINAL_NAMES[index]?.[1] !== name)
+    check('the 47 final names are exactly the names this rule is documented to produce', EXPECTED_FINAL_NAMES.length === 47 && wrong.length === 0, wrong.map(([id, name]) => `${id}=${name}`).join(' · '))
+  }
+  check('a renamed row keeps every other field the directory stated (only `name` moves)', (() => {
+    const before = modelOf('Doubao-Seed-Code')
+    const after = uniquifyDisplayNames([before])[0]!
+    return after.contextWindow === before.contextWindow && after.maxTokens === before.maxTokens && JSON.stringify(after.input) === JSON.stringify(before.input) && after.directoryFunction === before.directoryFunction && after.kind === before.kind && JSON.stringify(after.reasoningEfforts) === JSON.stringify(before.reasoningEfforts)
+  })())
+  check('internal components do NOT take part in the renaming', (() => {
+    const internal: TraeModel[] = [
+      { id: 'custom_model_gemini', name: 'Gemini-3.1-Pro-Preview', input: ['text'], directoryFunction: 'solo_work_remote', kind: 'internal', internalReason: 'usage=custom_model' },
+      { id: 'search_agent_qwen_fast', name: '', input: ['text'], directoryFunction: 'solo_agent_remote', kind: 'internal', internalReason: '线上模型名不含自己' }
+    ]
+    const out = uniquifyDisplayNames(internal)
+    return out[0]?.name === 'Gemini-3.1-Pro-Preview' && out[1]?.name === '' && out.every((model) => model.kind === 'internal')
+  })(), JSON.stringify(uniquifyDisplayNames([{ id: 'custom_model_gemini', name: 'Gemini-3.1-Pro-Preview', input: ['text'], directoryFunction: 'solo_work_remote', kind: 'internal', internalReason: 'usage=custom_model' }]).map((model) => model.name)))
+  check('...and an internal row sharing a chat row\'s name cannot push that chat row into a suffix', (() => {
+    const chatRow = chat.find((model) => model.id === 'glm-5.2')!
+    const out = uniquifyDisplayNames([chatRow, { id: 'glm-5.2_advisor_doubao', name: 'GLM-5.2', input: ['text'], directoryFunction: 'chat_v3', kind: 'internal', internalReason: '槽位' }])
+    return out[0]?.name === 'GLM-5.2' && out[1]?.name === 'GLM-5.2'
+  })())
+  check('parseModel still reports the directory name verbatim — the rename is a list-level projection', (() => {
+    const row = LIVE_CN_CHAT_ROWS.find((entry) => entry[0] === 'Doubao-Seed-2.0-Code')!
+    const parsed = parseModel({ config_name: row[0], usage: TRAE_CHAT_USAGE, display_config: { display_name: row[1] }, model_detail_list: [{ model_name: row[2][0]?.[1] }] }, 'solo_work_remote')
+    // …and that first row alone is judged internal (stale alias); it is the cross-function
+    // merge that makes the model chat. Two layers, neither of them touched by the rename.
+    return parsed?.name === 'Doubao-Seed-2.1-Turbo' && parsed?.kind === 'internal'
+  })())
+
+  /* ---- ⑥ idempotence + determinism (the names land in a profile patch) ---- */
+  {
+    const once = uniquifyDisplayNames(live)
+    const twice = uniquifyDisplayNames(once)
+    check('running the rule twice changes nothing (idempotent)', JSON.stringify(twice.map((model) => model.name)) === JSON.stringify(once.map((model) => model.name)))
+    check('...and a third run is still byte-identical', JSON.stringify(uniquifyDisplayNames(twice).map((model) => model.name)) === JSON.stringify(once.map((model) => model.name)))
+    const again = await fetchLiveChat()
+    check('a second fetch of the same directory produces the same names (deterministic)', JSON.stringify(again.map((model) => `${model.id}=${model.name}`)) === JSON.stringify(live.map((model) => `${model.id}=${model.name}`)))
+    const shuffled = await fetchLiveChat()
+    shuffled.reverse()
+    check('...and the answer does not depend on the order the rows arrive in', JSON.stringify(uniquifyDisplayNames(shuffled).map((model) => `${model.id}=${model.name}`).sort()) === JSON.stringify(once.map((model) => `${model.id}=${model.name}`).sort()))
+    check('every final name passes the identity test it was produced by (the reason a second run is silent)', chat.every((model) => displayNameOf({ ...model, name: model.name }) === model.name))
+    check('...including every Auto marker, which is recognised instead of being appended twice', chat.filter((model) => /-auto$/i.test(model.id)).every((model) => displayNameOf({ ...model, name: model.name }) === model.name && (model.name.match(/（Auto · /gu) ?? []).length === 1))
+  }
+
+  /* ---- ⑦ boundaries: malformed names never throw, and the two branches the live
+         roster has no representative for ---- */
+  {
+    const degenerate: readonly (readonly [string, unknown])[] = [['', ''], ['   ', ' '], ['-', '-'], ['—', '—'], ['—', '–—_.·'], ['x-1', undefined], ['x-1', 42], ['x-1', null]]
+    let threw = ''
+    let wrong = ''
+    for (const [id, name] of degenerate) {
+      let answer: string
+      try {
+        answer = displayNameOf({ id, name, input: ['text'], directoryFunction: 'chat_v3', kind: 'chat' } as unknown as TraeModel)
+      } catch (error) {
+        threw = `${JSON.stringify([id, name])} threw ${error instanceof Error ? error.message : String(error)}`
+        continue
+      }
+      const expected = id === '' ? String(name ?? '') : id
+      if (answer !== expected) wrong = `${JSON.stringify([id, name])} -> ${JSON.stringify(answer)}`
+    }
+    check(`no malformed display name throws (${degenerate.length} shapes)`, threw === '', threw)
+    check('...and every one of them falls back to the id (or to the raw name when there is no id at all)', wrong === '', wrong)
+    check('`-` in the middle of a name is NOT treated as nameless', displayNameOf({ id: 'kimi-k2', name: 'Kimi-K2', input: ['text'], directoryFunction: 'chat_v3', kind: 'chat' }) === 'Kimi-K2')
+  }
+  {
+    // Synthetic pair, REAL ids and REAL functions: two different ids whose display name
+    // contains both, routing through the same function — the only way the function tag
+    // alone cannot separate them, i.e. the third pass.
+    const ambiguous = uniquifyDisplayNames([
+      { id: 'glm-5.3', name: 'GLM-5.3', input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' },
+      { id: 'glm-5', name: 'GLM-5.3', input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' }
+    ])
+    check('when the function tag alone still collides, the id goes into the same brackets', ambiguous[0]?.name === 'GLM-5.3（work · glm-5.3）' && ambiguous[1]?.name === 'GLM-5.3（work · glm-5）', ambiguous.map((model) => model.name).join(' · '))
+    check('...and that outcome is unique, idempotent and order-independent too', JSON.stringify(uniquifyDisplayNames(ambiguous).map((model) => model.name)) === JSON.stringify(ambiguous.map((model) => model.name)) && new Set(ambiguous.map((model) => model.name)).size === 2)
+    // The two branches rule ③ deliberately does NOT have, documented as behaviour: a
+    // display name that is a legitimate SHORT form of the id is kept (containment is
+    // enough), and one that merely matches an alias is not — see the measurement
+    // assertions above for why reading the wire name adds nothing.
+    check('a display name is kept only when it CONTAINS the id: a short form is replaced, a longer one with a tail is kept', displayNameOf({ id: 'Doubao-Seed-2.1-Turbo', name: 'Seed-2.1-Turbo', input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' }) === 'Doubao-Seed-2.1-Turbo' && displayNameOf({ id: 'kimi-k2', name: 'Kimi-K2-0905', input: ['text'], directoryFunction: 'chat_v3', kind: 'chat' }) === 'Kimi-K2-0905')
+    check('...while a name that only matches a DIFFERENT model is replaced by the id', displayNameOf({ id: 'Doubao-Seed-2.0-Code', name: 'Doubao-Seed-2.1-Turbo', input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' }) === 'Doubao-Seed-2.0-Code')
+    check('...and the hand-written fallback roster is total under the same rule', (() => {
+      const out = uniquifyDisplayNames(FALLBACK_MODELS.cn)
+      return out.length === FALLBACK_MODELS.cn.length && new Set(out.map((model) => model.name)).size === out.length && out.every((model) => !dashOrBlank(model.name))
+    })())
   }
 }
 

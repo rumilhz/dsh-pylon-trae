@@ -5,6 +5,12 @@
  *   <dsh-node> tools/trae.ts credential             the token we bill with: source, expiry, whether
  *                                                    it has expired, whether it can be refreshed
  *                                                    (READ-ONLY, no network, no token value printed)
+ *   <dsh-node> tools/trae.ts credential-store       the credential entry the Models page draws the
+ *                                                    green dot from: is TRAE_API_KEY in
+ *                                                    $DSH_HOME/.credentials.yaml, does it hold the
+ *                                                    SAME token as the shim, and what would the
+ *                                                    next boot change? (READ-ONLY, no network, no
+ *                                                    value printed — only length + sha256[0..12])
  *   <dsh-node> tools/trae.ts models [--limit 20]     the live directory as the provider sees it
  *   <dsh-node> tools/trae.ts usage                   CN credits (read-only, no quota spent)
  *   <dsh-node> tools/trae.ts checkin                 today's check-in status (read-only)
@@ -17,13 +23,18 @@
  * Tokens are never printed; only a 12-hex fingerprint.
  */
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { handleApi, type ApiDeps } from '../src/api.ts'
 import {
   canRefresh,
   credentialStorePath,
+  credentialsDocumentPath,
+  credentialsRefValue,
   isExpired,
+  listCredentialBackups,
   preferValidStoredCredential,
+  readCredentials,
   readStoredCredential,
   scanCredentials,
   tokenFingerprint,
@@ -32,6 +43,7 @@ import {
 import { FALLBACK_MODELS, fetchDirectoryModels, type TraeModel } from '../src/catalog.ts'
 import { dshHome } from '../src/guard.ts'
 import { readTraeIdentity } from '../src/identity.ts'
+import { TRAE_API_KEY_REF } from '../src/seed.ts'
 import { traeStorageCandidates } from '../src/paths.ts'
 
 const argv = process.argv.slice(2)
@@ -115,6 +127,47 @@ try {
     if (outcome !== undefined && outcome['detail'] !== undefined) print('detail', outcome['detail'])
     console.log(line('='))
     process.exit(result['ok'] === true ? 0 : 1)
+  }
+
+  if (command === 'credential-store') {
+    // READ-ONLY and entirely local: no gateway request, no host request, and no
+    // value on screen. It answers the one question the Models page cannot: "is the
+    // green dot TRUE, and would the next boot change anything?" — which is
+    // `describe(TRAE_API_KEY).configured` on the one side and "is that value still
+    // the token this plugin will authenticate its shim with" on the other. A
+    // mismatch is worth seeing BEFORE restarting DSH: the next boot syncs it (and
+    // that is the fix), but until then the route would answer 401.
+    const home = dshHome()
+    const path = credentialsDocumentPath(home)
+    const read = readCredentials(home)
+    const shimTokenPath = join(home, '.dsh-pylon-trae', 'cn-shim-token.json')
+    let shimToken: string | undefined
+    try {
+      shimToken = readFileSync(shimTokenPath, 'utf8').trim() || undefined
+    } catch {
+      shimToken = undefined
+    }
+    const fingerprint = (value: string): string => createHash('sha256').update(value).digest('hex').slice(0, 12)
+    console.log(line('='))
+    console.log('dsh-pylon-trae CLI · credential-store · 只读、不联网（值不打印，只有长度 + sha256 前 12 位）')
+    console.log(line('='))
+    print('document', path)
+    if ('detail' in read) {
+      print('readable', `否 —— ${read.detail}`)
+      print('consequence', '文档读不回来时插件不写：宁可不点亮绿点，也不冒红点的险')
+    } else {
+      const stored = read.refs.get(TRAE_API_KEY_REF)
+      print('readable', `是（version ${String(read.version ?? 1)}，refs ${read.refs.size} 个）`)
+      print('refs', [...read.refs.keys()].join(', '))
+      print('greenDotRef', `${TRAE_API_KEY_REF} = ${stored === undefined ? '缺失 ⇒ 模型页没有绿点' : `已配置（len ${stored.length}, sha256 ${fingerprint(stored)}）`}`)
+      print('shimToken', shimToken === undefined ? `不存在（${shimTokenPath}）—— 下次启动会生成新 token 并同步` : `len ${shimToken.length}, sha256 ${fingerprint(shimToken)}`)
+      print('sameValue', stored === undefined || shimToken === undefined ? '无法比较' : stored === shimToken ? '是 —— 下次启动一个字节都不写' : '否 —— 下次启动会同步条目与凭据库（旧值轮换后必然失效）')
+      print('otherRefs', read.refs.size - (stored === undefined ? 0 : 1))
+    }
+    print('backups', `${listCredentialBackups(home).length} 个（在 .dsh-pylon-trae/backups 里，只增改我们的键）`)
+    print('probeValue', credentialsRefValue(home, TRAE_API_KEY_REF) === undefined ? '不在文档里' : '在文档里（磁盘读回）')
+    console.log(line('='))
+    process.exit('detail' in read ? 1 : 0)
   }
 
   if (command === 'credential') {
