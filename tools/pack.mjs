@@ -22,8 +22,9 @@
  * `tools/fixtures/*.json`（**默认进包**；`--no-fixtures` 可裁掉）：它们是"钉住的上游
  * 产物"，仓库里有生成脚本（`tools/emit-turn-bodies.mjs`），而生成脚本要读
  * `~/.dsh/trae-pin` 里那份上游快照 —— 新电脑上没有它，所以**在解出来的包里它们无法
- * 重建**。合计 20 KB，而代价是"发布物自带的两个测试是红的"，不划算，所以默认带着：
- * 解包后自检是 10 passed · 0 failed（在有钉死快照的机器上）。带着还有个额外好处：
+ * 重建**。合计 20 KB，而代价是：解包后自检里有两组会 **SKIP（套件退出码 3）**，而不是 FAIL
+ * —— 缺文件与文件过期是两回事，后者仍判失败。这点代价不划算，所以默认带着：
+ * 解包后自检是 11 passed · 0 failed（在有钉死快照的机器上）。带着还有个额外好处：
  * fixture 与 `src/` 的一致性闸门（`test-contract.ts` 的过期检查）跟着发布物一起走，
  * 打一份 src 变了却没重生成 fixture 的包会被它当场判红。
  * 形状说清楚：**缺** fixture 是 SKIP（套件退出码 3），**有但过期**是 FAIL —— 两件事
@@ -396,7 +397,7 @@ const fixtureBytes = collected.filter((entry) => entry.path.startsWith('tools/fi
 if (fixtureBytes > 0) {
   console.log('')
   console.log(`自检说明：本包含 tools/fixtures/*.json（合计 ${fixtureBytes} B）`)
-  console.log(`      ⇒ 解包后 \`node tools/_run-suites.mjs\` 每组都能真跑：有 ~/.dsh/trae-pin 那份钉住快照的机器上是 10 passed · 0 failed。`)
+  console.log(`      ⇒ 解包后 \`node tools/_run-suites.mjs\` 每组都能真跑：有 ~/.dsh/trae-pin 那份钉住快照的机器上是 11 passed · 0 failed。`)
   console.log(`         没有那份快照时，test-contract 会以"缺少真相源"退 1（它故意的闸：没核对过 ≠ 核对过且正确），test-sse 仍绿。`)
   console.log(`         （fixture 本身要是与包内 src/ 不一致，test-contract 当场判 FAIL —— 这正是带着它走的好处。）`)
 } else {
@@ -404,7 +405,7 @@ if (fixtureBytes > 0) {
   if (fixtureCount > 0) {
     console.log('')
     console.log(`自检说明：本包**不含** tools/fixtures/*.json ⇒ 解包后 \`node tools/_run-suites.mjs\` 少两组检查：`)
-    console.log(`      8 passed · 0 failed · 2 skipped（SKIP 带原因行；缺输入不是 FAIL，但也从来不算 PASS）。`)
+    console.log(`      9 passed · 0 failed · 2 skipped（SKIP 带原因行；缺输入不是 FAIL，但也从来不算 PASS）。`)
   }
 }
 if (unresolved.length > 0) console.log(`\n⚠️  白名单里有 ${unresolved.length} 条在当前目录找不到（已跳过）：${unresolved.join(', ')}`)
