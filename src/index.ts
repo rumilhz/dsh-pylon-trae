@@ -54,11 +54,18 @@ import {
   type TraeCredential,
   type TraeRefreshDevice
 } from './auth.ts'
-import { FALLBACK_MODELS, fetchDirectoryModels, type TraeModel } from './catalog.ts'
+import { FALLBACK_MODELS, fetchDirectoryModels, partitionModels, type TraeModel } from './catalog.ts'
 import { dshHome, explainPatchLookup } from './guard.ts'
 import { readTraeIdentity, type TraeIdentity } from './identity.ts'
 import { ownCopyPath, traeStorageCandidates } from './paths.ts'
-import { buildProviderProfile, seedProvider, type SeedOutcome, type SettingsServiceLike } from './seed.ts'
+import {
+  buildProviderProfile,
+  currentProviderModelIds,
+  pruneInternalModels,
+  seedProvider,
+  type SeedOutcome,
+  type SettingsServiceLike
+} from './seed.ts'
 import { createShim } from './shim.ts'
 
 /**
@@ -555,13 +562,18 @@ export function joinWarnings(...parts: (string | undefined)[]): string | undefin
 }
 
 function describeOutcome(outcome: SeedOutcome): string {
+  // The hidden count is appended to EVERY outcome that could have written, from ONE
+  // place: a write that silently wrote fewer models than the directory offered is
+  // the shape this plugin has been bitten by before, and "47 models（隐藏 32 个内部
+  // 组件）" is the difference between a deliberate filter and a bug.
+  const hidden = 'skippedInternal' in outcome && outcome.skippedInternal.length > 0 ? `（另有 ${outcome.skippedInternal.length} 个内部组件没写：${outcome.skippedInternal.slice(0, 8).join('、')}${outcome.skippedInternal.length > 8 ? '…' : ''}）` : ''
   switch (outcome.kind) {
     case 'created':
-      return `已生成可编辑供应商：${outcome.ns}.providers.<id>，${outcome.modelCount} 个模型（备份 ${outcome.backupPath}）`
+      return `已生成可编辑供应商：${outcome.ns}.providers.<id>，${outcome.modelCount} 个模型${hidden}（备份 ${outcome.backupPath}）`
     case 'present':
-      return `供应商已存在，未改动（${outcome.ns}${outcome.modelCount === undefined ? '' : `，${outcome.modelCount} 个模型`}）`
+      return `供应商已存在，未改动（${outcome.ns}${outcome.modelCount === undefined ? '' : `，${outcome.modelCount} 个模型`}）${hidden}`
     case 'rebuilt':
-      return `重建清单：保留 ${outcome.keptModels} 个，新增 ${outcome.addedModels.length} 个`
+      return `重建清单：保留 ${outcome.keptModels} 个，新增 ${outcome.addedModels.length} 个${hidden}`
     case 'no-namespace':
       return `跳过写入：${outcome.detail}`
     case 'no-guard':
@@ -1011,7 +1023,8 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
         providerName: config.providerId,
         profile,
         mode: 'refresh',
-        previouslyOffered: state.lastOffered ?? []
+        previouslyOffered: state.lastOffered ?? [],
+        skippedInternal: partitionModels(models).internalIds
       })
       if (outcome.kind === 'rebuilt') {
         state = { ...state, lastOffered: outcome.offeredModels }
@@ -1068,7 +1081,33 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
         selectAccount,
         refresh: refreshDirectory,
         // The read-only half. Same gateway call, no write path — see reloadDirectory.
-        reload: reloadDirectory
+        reload: reloadDirectory,
+        /**
+         * Read-only: what the user's OWN entry still carries that the live
+         * directory judges internal. Both halves of the comparison come from
+         * different places on purpose — `models` is what Trae offers now,
+         * `currentProviderModelIds` is what the profile currently says — and the
+         * difference is exactly the junk an earlier version wrote.
+         */
+        internalInEntry: async () => {
+          const inEntry = new Set(currentProviderModelIds(settings, config.providerId))
+          return partitionModels(models).internalIds.filter((id) => inEntry.has(id))
+        },
+        /**
+         * The DELETE half — the only path in this plugin that removes rows from
+         * user configuration. It is NOT scheduled anywhere: `POST
+         * /models/prune-internal` is the only caller, and that route is only
+         * reachable from the card's own button (see src/api.ts). `models` is read at
+         * CALL time rather than captured, so a directory reload between boot and the
+         * click is what decides which ids are internal.
+         */
+        pruneInternal: async () =>
+          pruneInternalModels({
+            settings,
+            pluginName: name,
+            providerName: config.providerId,
+            internalIds: partitionModels(models).internalIds
+          })
       })
     // Publish the SAME handler to the host route above; the shim keeps using it
     // directly. One implementation, two transports.
@@ -1081,6 +1120,13 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
       credential,
       identity,
       models: () => models,
+      /**
+       * `/v1/models` advertises exactly what the provider entry got — the SAME
+       * `partitionModels(models).chat` verdict `seedProvider` is handed below, so the
+       * shim cannot list an id pi-ai was never told about (nor hide one it was). The
+       * classification stays in catalog.ts; the shim only transports this list.
+       */
+      advertisedModels: () => partitionModels(models).chat,
       api,
       logger: { info: (m, d) => ctx.logger.info(m, d), warn: (m, d) => ctx.logger.warn(m, d), error: (m, d) => ctx.logger.error(m, d) }
     })
@@ -1105,15 +1151,35 @@ export function apply(ctx: Ctx, config: TraeConfig): void {
       return
     }
     trace(`guard: ${explainPatchLookup(name)}`)
+    const catalogue = partitionModels(models)
     const profile = buildProviderProfile({ displayName: config.displayName, baseUrl: shim.baseUrl(), token, models })
     const outcome = await seedProvider({
       settings: settingsFace,
       pluginName: name,
       providerName: config.providerId,
       profile,
-      ...(config.mode === 'refresh' ? { mode: 'refresh' as const } : {})
+      ...(config.mode === 'refresh' ? { mode: 'refresh' as const } : {}),
+      skippedInternal: catalogue.internalIds
     })
     trace(`seed: ${outcome.kind} — ${describeOutcome(outcome)}`)
+    /**
+     * 已存在的垃圾条目：只提示，不自动删。
+     *
+     * An entry written by an earlier version still lists the internal components,
+     * and `seedProvider` deliberately does not touch it (a user's entry is theirs).
+     * So the only thing this plugin owes the user at boot is the fact plus the way
+     * out — one line in `boot.log` and a button on the card (`POST
+     * /models/prune-internal`). Deleting from user configuration without being
+     * asked is the accident this plugin exists to avoid, not a convenience it
+     * should take.
+     */
+    const stillInEntry = 'offeredModels' in outcome ? outcome.offeredModels.filter((id) => catalogue.internalIds.includes(id)) : []
+    if (stillInEntry.length > 0) {
+      trace(`internal: 检测到 ${stillInEntry.length} 个内部组件仍在你的条目里（${stillInEntry.join('、')}）—— 未自动删除；在设置卡片点「移除内部组件」即可清除（会先备份到 profile 之外）`)
+      ctx.logger.warn(`dsh-pylon-trae: 检测到 ${stillInEntry.length} 个 Trae 内部流程组件仍在你的模型条目里（如 ${stillInEntry.slice(0, 3).join('、')}）。没有自动删除 —— 在设置卡片点「移除内部组件」即可清除。`)
+    } else if (catalogue.internal.length > 0) {
+      trace(`internal: 目录里 ${catalogue.internal.length} 个内部组件已隐藏、未写入条目（${catalogue.internalIds.slice(0, 8).join('、')}${catalogue.internalIds.length > 8 ? '…' : ''}）`)
+    }
     if (outcome.kind === 'created' || outcome.kind === 'present') {
       state = { ...state, lastOffered: outcome.offeredModels }
       writeState({ lastOffered: outcome.offeredModels })

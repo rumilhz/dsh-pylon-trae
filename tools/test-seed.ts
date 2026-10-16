@@ -41,7 +41,17 @@ import {
   verifyPatch
 } from '../src/guard.ts'
 import { candidateReports, describeCredentialScan, renderCandidateTable, scanCredentials, type CredentialScan } from '../src/auth.ts'
-import { buildProviderProfile, findProviderNamespace, isProvidersForm, seedProvider, type SettingsDescriptorLike, type SettingsServiceLike } from '../src/seed.ts'
+import { partitionModels, type TraeModel } from '../src/catalog.ts'
+import {
+  buildProviderProfile,
+  currentProviderModelIds,
+  findProviderNamespace,
+  isProvidersForm,
+  pruneInternalModels,
+  seedProvider,
+  type SettingsDescriptorLike,
+  type SettingsServiceLike
+} from '../src/seed.ts'
 import type { TraeStorageCandidate } from '../src/paths.ts'
 
 const PLUGIN = 'dsh-pylon-trae'
@@ -157,10 +167,10 @@ const settings: SettingsServiceLike = {
   }
 }
 
-const models = [
-  { id: 'm1', name: 'One', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote' },
-  { id: 'm2', name: 'Two', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote' },
-  { id: 'm3', name: 'Three', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote' }
+const models: readonly TraeModel[] = [
+  { id: 'm1', name: 'One', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'chat' as const },
+  { id: 'm2', name: 'Two', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'chat' as const },
+  { id: 'm3', name: 'Three', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'chat' as const }
 ]
 const profile = buildProviderProfile({ displayName: 'Trae', baseUrl: 'http://127.0.0.1:7864', token: 'test-token', models })
 check('profile carries no apiKeyEnv (deliberate)', !('apiKeyEnv' in profile))
@@ -199,7 +209,7 @@ check('file unchanged', readFileSync(patchPath, 'utf8') === afterCreate)
 console.log('\n[3] refresh — user deleted m2, directory still lists it')
 state.providers[PROVIDER] = { ...(state.providers[PROVIDER] as object), models: [{ id: 'm1' }, { id: 'm3' }] }
 writeFileSync(patchPath, renderPatch(), 'utf8')
-const live = [...models, { id: 'm4', name: 'Four', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote' }]
+const live = [...models, { id: 'm4', name: 'Four', contextWindow: 1000, input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'chat' as const }]
 const refreshProfile = buildProviderProfile({ displayName: 'Trae', baseUrl: 'http://127.0.0.1:7864', token: 'test-token', models: live })
 const refreshed = await seedProvider({
   settings,
@@ -468,6 +478,150 @@ console.log('\n[8] a failed credential scan says WHICH candidates it probed')
   const missing = describeCredentialScan({ credentials: [], failures: [], found: [] } as CredentialScan, candidates)
   check('"none of them exists" is stated as such (not merely "no credential")', missing.includes('没有任何一个存在'), missing)
   check('the table is bounded, never one huge line', renderCandidateTable(Array.from({ length: 80 }, (_, index) => ({ edition: 'cn', region: 'cn' as const, path: `C:/very/long/path/number/${index}/storage.json`, source: 'desktop' as const, exists: index % 2 === 0 }))).length <= 420)
+}
+
+// ------------------------------------------- 9. internal components stay OUT of the entry
+//
+// The defect this section exists for: 79 ids — the whole callable directory,
+// internal workflow components included — were written into the user's provider
+// entry, so the model picker offered `title_generation` and `fast_apply`.
+console.log('\n[9] the write path offers conversation models ONLY')
+{
+  const judged: readonly TraeModel[] = [
+    { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 116000, input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'chat' as const },
+    { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 200000, input: ['text'] as const, directoryFunction: 'chat_v3', kind: 'chat' as const },
+    { id: 'title_generation', name: 'title_generation', contextWindow: 44096, input: ['text'] as const, directoryFunction: 'chat_v3', kind: 'internal' as const, internalReason: 'usage=title_generation' },
+    { id: 'fast_apply', name: 'fast_apply', contextWindow: 40000, input: ['text'] as const, directoryFunction: 'chat_v3', kind: 'internal' as const, internalReason: 'usage=fast_apply' },
+    { id: 'custom_model_gpt-6', name: 'custom_model_gpt-6', contextWindow: 1, input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'internal' as const, internalReason: 'usage=custom_model' }
+  ]
+  const split = partitionModels(judged)
+  check('the catalogue splits 2 chat / 3 internal', split.chat.length === 2 && split.internalIds.join(',') === 'title_generation,fast_apply,custom_model_gpt-6', split.internalIds.join(','))
+
+  const profile = buildProviderProfile({ displayName: 'Trae', baseUrl: 'http://127.0.0.1:7864', token: 't', models: judged })
+  check('buildProviderProfile writes ONLY the two conversation models', profile.models.map((model) => model.id).join(',') === 'glm-5.2,kimi-k2.6', profile.models.map((model) => model.id).join(','))
+  check('...and not one internal component appears in the entry', !profile.models.some((model) => split.internalIds.includes(model.id)))
+  const withInternal = buildProviderProfile({ displayName: 'Trae', baseUrl: 'http://127.0.0.1:7864', token: 't', models: judged, includeInternal: true })
+  check('includeInternal: true is the documented escape hatch (all 5 written)', withInternal.models.length === 5, String(withInternal.models.length))
+  // STRICT, not lenient: a row that never went through the classifier has no verdict,
+  // and "no verdict" must not be written as if it had been judged safe.
+  const unjudged = [{ id: 'hand-built', name: 'H', input: ['text'] as const, directoryFunction: 'chat_v3' } as unknown as TraeModel]
+  check('a TraeModel with no kind is NOT written', buildProviderProfile({ displayName: 'Trae', baseUrl: 'http://127.0.0.1:7864', token: 't', models: unjudged }).models.length === 0)
+
+  // The seed outcome reports what it left out — the omission is visible, not silent.
+  const created = await seedProvider({
+    settings,
+    pluginName: PLUGIN,
+    providerName: 'trae-only-chat',
+    profile,
+    skippedInternal: split.internalIds
+  })
+  check('seed writes the entry with 2 models', created.kind === 'created' && created.modelCount === 2, created.kind)
+  check('...and SeedOutcome names all 3 skipped components', created.kind === 'created' && created.skippedInternal.join(',') === 'title_generation,fast_apply,custom_model_gpt-6', created.kind === 'created' ? created.skippedInternal.join(',') : '')
+  const onDisk = currentProviderModelIds(settings, 'trae-only-chat')
+  check('...and the file on disk really holds only those 2 ids', onDisk.join(',') === 'glm-5.2,kimi-k2.6', onDisk.join(','))
+  const present = await seedProvider({ settings, pluginName: PLUGIN, providerName: 'trae-only-chat', profile, skippedInternal: ['title_generation', 'fast_apply', 'title_generation'] })
+  check('a `present` outcome carries skippedInternal too (duplicates collapsed)', present.kind === 'present' && present.skippedInternal.join(',') === 'title_generation,fast_apply', present.kind === 'present' ? present.skippedInternal.join(',') : present.kind)
+  const omitted = await seedProvider({ settings, pluginName: PLUGIN, providerName: 'trae-only-chat', profile })
+  check('a caller that classifies nothing reports an empty list, never undefined', omitted.kind === 'present' && Array.isArray(omitted.skippedInternal) && omitted.skippedInternal.length === 0, omitted.kind === 'present' ? JSON.stringify(omitted.skippedInternal) : omitted.kind)
+}
+
+// ------------------------------------------- 10. removing what an earlier version already wrote
+console.log('\n[10] prune-internal — the explicit clean-up, guarded like every other write')
+const INTERNAL_IDS = ['title_generation', 'fast_apply', 'custom_model_gpt-6', 'search_agent_qwen_fast'] as const
+{
+  // An entry as an earlier version left it: conversation models AND components, some
+  // as bare `{ id }` rows (which is what a refresh rewrites an unknown id into).
+  state.providers['trae-junk'] = {
+    displayName: 'Trae（我改过这个名字）',
+    api: 'openai-completions',
+    baseURL: 'http://127.0.0.1:7864/v1',
+    headers: { Authorization: 'Bearer shim-token' },
+    models: [{ id: 'glm-5.2', name: 'GLM-5.2' }, { id: 'title_generation' }, { id: 'kimi-k2.6', name: 'Kimi-K2.6' }, { id: 'fast_apply' }, { id: 'custom_model_gpt-6' }]
+  }
+  writeFileSync(patchPath, renderPatch(), 'utf8')
+  const beforePrune = readFileSync(patchPath, 'utf8')
+  check('currentProviderModelIds reads the 5 ids in order', currentProviderModelIds(settings, 'trae-junk').join(',') === 'glm-5.2,title_generation,kimi-k2.6,fast_apply,custom_model_gpt-6')
+
+  const pruned = await pruneInternalModels({ settings, pluginName: PLUGIN, providerName: 'trae-junk', internalIds: INTERNAL_IDS })
+  check('outcome is pruned', pruned.kind === 'pruned', pruned.kind)
+  check('...and it NAMES the 3 rows it removed (a delete must be enumerable)', pruned.kind === 'pruned' && pruned.removed.join(',') === 'title_generation,fast_apply,custom_model_gpt-6', pruned.kind === 'pruned' ? pruned.removed.join(',') : '')
+  check('...it does NOT remove the id that was on its list but absent from the entry', pruned.kind === 'pruned' && !pruned.removed.includes('search_agent_qwen_fast'))
+  check('...it kept exactly the two conversation models', pruned.kind === 'pruned' && pruned.keptModels === 2, pruned.kind === 'pruned' ? String(pruned.keptModels) : '')
+  check('...and the row order of what stayed is the user\'s', currentProviderModelIds(settings, 'trae-junk').join(',') === 'glm-5.2,kimi-k2.6', currentProviderModelIds(settings, 'trae-junk').join(','))
+  check('a backup exists, and it holds the PRE-prune bytes', pruned.kind === 'pruned' && existsSync(pruned.backupPath) && readFileSync(pruned.backupPath, 'utf8') === beforePrune)
+  check('...and that backup is OUTSIDE the profile', pruned.kind === 'pruned' && !pruned.backupPath.startsWith(profileDir), pruned.kind === 'pruned' ? pruned.backupPath : '')
+  const entry = state.providers['trae-junk'] as Record<string, unknown>
+  check('every other field of the entry survived verbatim (displayName/api/baseURL/headers)', entry['displayName'] === 'Trae（我改过这个名字）' && entry['api'] === 'openai-completions' && entry['baseURL'] === 'http://127.0.0.1:7864/v1' && JSON.stringify(entry['headers']) === JSON.stringify({ Authorization: 'Bearer shim-token' }), JSON.stringify(Object.keys(entry)))
+  check('the two remaining rows kept their names (not flattened to bare ids)', JSON.stringify((entry['models'] as { name?: string }[]).map((model) => model.name)) === JSON.stringify(['GLM-5.2', 'Kimi-K2.6']))
+
+  // ③ an empty candidate list is not a write.
+  const callsBefore = state.mutateCalls
+  const afterPrune = readFileSync(patchPath, 'utf8')
+  const again = await pruneInternalModels({ settings, pluginName: PLUGIN, providerName: 'trae-junk', internalIds: INTERNAL_IDS })
+  check('a second prune finds nothing and says so', again.kind === 'nothing', again.kind)
+  check('...and writes NOTHING (no mutate call, file byte-identical)', state.mutateCalls === callsBefore && readFileSync(patchPath, 'utf8') === afterPrune)
+  const absent = await pruneInternalModels({ settings, pluginName: PLUGIN, providerName: 'no-such-provider', internalIds: INTERNAL_IDS })
+  check('a provider that does not exist is reported as absent, not as "nothing to do"', absent.kind === 'absent', absent.kind)
+}
+
+// ------------------------------------------- 10b. prune obeys the guard, and obeys the tombstone
+console.log('\n[10b] prune refuses without a guard, rolls back a bad write, and never revives a deleted model')
+{
+  // No patch file for this plugin → no way to verify a write → refuse. The entry
+  // needs a real internal row, because "nothing to remove" is checked first and
+  // answering "no guard" for a delete that was never going to happen would be a
+  // false alarm.
+  state.providers['trae-junk'] = { displayName: 'Trae', models: [{ id: 'title_generation' }, { id: 'glm-5.2' }] }
+  writeFileSync(patchPath, renderPatch(), 'utf8')
+  process.env['DSH_HOME'] = join(home, 'nowhere')
+  const noGuard = await pruneInternalModels({ settings, pluginName: PLUGIN, providerName: 'trae-junk', internalIds: INTERNAL_IDS })
+  process.env['DSH_HOME'] = home
+  check('with no cordis.patch.yml the prune refuses (no-guard), it does not write blind', noGuard.kind === 'no-guard', noGuard.kind)
+  check('...and the refusal states the consequence', noGuard.kind === 'no-guard' && noGuard.detail.includes('没有退路就不改用户配置'), noGuard.kind === 'no-guard' ? noGuard.detail.slice(0, 60) : '')
+  check('...and the internal row is untouched because nothing was written', currentProviderModelIds(settings, 'trae-junk').join(',') === 'title_generation,glm-5.2', currentProviderModelIds(settings, 'trae-junk').join(','))
+
+  // A write that lands with one row missing → rule ④ → roll back byte-for-byte.
+  state.providers['trae-partial'] = {
+    displayName: 'Trae Partial',
+    models: [{ id: 'm3', name: 'Three' }, { id: 'title_generation' }, { id: 'glm-5.2', name: 'GLM-5.2' }]
+  }
+  writeFileSync(patchPath, renderPatch(), 'utf8')
+  const beforeBad = readFileSync(patchPath, 'utf8')
+  state.truncateProviderModels = true
+  const rolledBack = await pruneInternalModels({ settings, pluginName: PLUGIN, providerName: 'trae-partial', internalIds: INTERNAL_IDS })
+  state.truncateProviderModels = false
+  check('a write that lands with a row missing is rolled back', rolledBack.kind === 'rolled-back', rolledBack.kind)
+  check('...and the reason names the model count mismatch', rolledBack.kind === 'rolled-back' && rolledBack.reasons.some((reason) => reason.includes('模型数不符')), rolledBack.kind === 'rolled-back' ? rolledBack.reasons.join(' / ') : '')
+  check('...the entry is back byte-for-byte, internal row included', readFileSync(patchPath, 'utf8') === beforeBad)
+  check('...and the failed prune STILL left a backup to restore from', rolledBack.kind === 'rolled-back' && existsSync(rolledBack.backupPath), rolledBack.kind === 'rolled-back' ? rolledBack.backupPath : '')
+
+  // Tombstone semantics: a conversation model the user deleted stays deleted. The
+  // prune only ever removes ids the LIVE catalogue judged internal, so it cannot be
+  // a back door that re-adds or re-creates anything — and the tombstone set it must
+  // not disturb (`previouslyOffered`) is not even a parameter of this function.
+  state.providers['trae-tombstone'] = { displayName: 'Trae T', models: [{ id: 'glm-5.2', name: 'GLM-5.2' }, { id: 'title_generation' }] }
+  writeFileSync(patchPath, renderPatch(), 'utf8')
+  const tombPrune = await pruneInternalModels({ settings, pluginName: PLUGIN, providerName: 'trae-tombstone', internalIds: INTERNAL_IDS })
+  check('prune removes the component and leaves the one chat model', tombPrune.kind === 'pruned' && tombPrune.removed.join(',') === 'title_generation' && currentProviderModelIds(settings, 'trae-tombstone').join(',') === 'glm-5.2', tombPrune.kind)
+  check('...and returns NO `offeredModels` (it must not touch the tombstone set)', !('offeredModels' in tombPrune))
+  const afterTombPrune = await seedProvider({
+    settings,
+    pluginName: PLUGIN,
+    providerName: 'trae-tombstone',
+    profile: buildProviderProfile({
+      displayName: 'Trae T',
+      baseUrl: 'http://127.0.0.1:7864',
+      token: 't',
+      models: [
+        { id: 'glm-5.2', name: 'GLM-5.2', input: ['text'] as const, directoryFunction: 'solo_work_remote', kind: 'chat' as const },
+        { id: 'kimi-k2.6', name: 'Kimi-K2.6', input: ['text'] as const, directoryFunction: 'chat_v3', kind: 'chat' as const }
+      ]
+    }),
+    mode: 'refresh',
+    previouslyOffered: ['glm-5.2', 'kimi-k2.6']
+  })
+  check('a refresh after a prune still refuses to resurrect the deleted model', afterTombPrune.kind === 'rebuilt' && afterTombPrune.addedModels.length === 0, afterTombPrune.kind === 'rebuilt' ? afterTombPrune.addedModels.join(',') : afterTombPrune.kind)
+  check('...and the entry still holds exactly what the user had left', currentProviderModelIds(settings, 'trae-tombstone').join(',') === 'glm-5.2', currentProviderModelIds(settings, 'trae-tombstone').join(','))
 }
 
 // ---------------------------------------------------------------- summary

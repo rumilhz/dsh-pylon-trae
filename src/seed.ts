@@ -224,17 +224,39 @@ export interface ProviderProfile {
  * insists on an Authorization header of its own
  * (@earendil-works/pi-ai/dist/api/openai-completions.js:34-40) — which is exactly
  * the header we put the shim token in. No credentials service involved.
+ *
+ * ## Why internal components are NOT written by default
+ *
+ * The Trae directory answers with every callable `config_name`, and most of them
+ * are not conversation models: `title_generation`, `fast_apply`,
+ * `input_optimization`, the `custom_model_*` placeholders, the `*_advisor` /
+ * `search_agent_*` routing aliases. The criterion and its measured evidence live
+ * in `src/catalog.ts` (see `classifyDirectoryEntry`); this function only obeys its
+ * verdict.
+ *
+ * The rule is stated strictly as `kind === 'chat'` rather than
+ * `kind !== 'internal'`: a `TraeModel` that never went through `parseModel` has no
+ * verdict at all, and "not judged" must not be written into a user's configuration
+ * as if it had been judged safe. The filter is ONE line and it lives HERE — not in
+ * the callers — so no composition can accidentally write the junk list.
+ *
+ * `includeInternal: true` writes them anyway: that is the escape hatch for a user
+ * whose Trae account really does route through one of these slots, and it is what
+ * makes this a default rather than a prohibition.
  */
 export function buildProviderProfile(options: {
   displayName: string
   baseUrl: string
   token: string
   models: readonly TraeModel[]
+  /** Write the internal components too. Default FALSE — see the note above. */
+  includeInternal?: boolean
 }): ProviderProfile {
   const seen = new Set<string>()
   const models: ProviderProfileModel[] = []
   for (const model of options.models) {
     if (model.id === '' || seen.has(model.id)) continue
+    if (model.kind !== 'chat' && options.includeInternal !== true) continue
     seen.add(model.id)
     // A model the directory described no recoverable effort list for gets no
     // reasoning field at all: the host then keeps whatever the installed catalog
@@ -265,10 +287,20 @@ export function buildProviderProfile(options: {
   }
 }
 
+/**
+ * What a seed attempt did — and, on every outcome that could have written,
+ * WHICH internal components were deliberately left out.
+ *
+ * `skippedInternal` is not decoration. Hiding a row from a user's configuration
+ * is a decision made on their behalf, and a decision nobody can see is
+ * indistinguishable from a bug: this list is what `boot.log`, the settings card
+ * and `SeedOutcome` all read, so "47 models, 32 hidden" is always explainable
+ * down to the id.
+ */
 export type SeedOutcome =
-  | { kind: 'created'; ns: string; modelCount: number; backupPath: string; offeredModels: string[] }
-  | { kind: 'present'; ns: string; modelCount?: number; offeredModels: string[] }
-  | { kind: 'rebuilt'; ns: string; addedModels: string[]; keptModels: number; backupPath: string; offeredModels: string[] }
+  | { kind: 'created'; ns: string; modelCount: number; backupPath: string; offeredModels: string[]; skippedInternal: string[] }
+  | { kind: 'present'; ns: string; modelCount?: number; offeredModels: string[]; skippedInternal: string[] }
+  | { kind: 'rebuilt'; ns: string; addedModels: string[]; keptModels: number; backupPath: string; offeredModels: string[]; skippedInternal: string[] }
   | { kind: 'no-namespace'; detail: string }
   | { kind: 'no-guard'; detail: string }
   | { kind: 'rolled-back'; ns: string; reasons: string[]; backupPath: string }
@@ -290,6 +322,13 @@ export interface SeedOptions {
    * gone now is the user's decision, and only genuinely NEW ids are added.
    */
   previouslyOffered?: readonly string[]
+  /**
+   * The ids this seed deliberately did NOT write, i.e. the internal components
+   * `buildProviderProfile` filtered out. Reported back verbatim so the caller can
+   * put them in `boot.log` and on the card instead of leaving the omission
+   * unrecorded. Defaults to `[]` so a caller that does not classify still works.
+   */
+  skippedInternal?: readonly string[]
 }
 
 /** Write the provider entry, or report why we did not. Never writes without a guard. */
@@ -302,11 +341,14 @@ export async function seedProvider(options: SeedOptions): Promise<SeedOutcome> {
   if (namespace === undefined) {
     return { kind: 'no-namespace', detail: `没有任何「根级 providers 是 dict」的命名空间。看到的条目：${probeNamespaces(settings)}` }
   }
+  // Deduplicated so a caller that hands over the same id twice (two functions listing
+  // one entry, a hand-built list) cannot make the report say "2 hidden" for 1 model.
+  const skippedInternal = [...new Set(options.skippedInternal ?? [])]
   const exists = providerExists(namespace, options.providerName)
   const current = namespace.providers[options.providerName] as { models?: { id?: unknown }[] } | undefined
   const currentIds = Array.isArray(current?.models) ? current.models.map((model) => model?.id).filter((id): id is string => typeof id === 'string') : []
   if (exists && options.mode !== 'refresh') {
-    return { kind: 'present', ns: namespace.ns, modelCount: currentIds.length, offeredModels: currentIds }
+    return { kind: 'present', ns: namespace.ns, modelCount: currentIds.length, offeredModels: currentIds, skippedInternal }
   }
   const patchPath = resolvePatchPath(options.pluginName)
   if (patchPath === undefined) {
@@ -318,7 +360,7 @@ export async function seedProvider(options: SeedOptions): Promise<SeedOutcome> {
     const offered = new Set(options.previouslyOffered ?? [])
     const added = target.models.filter((model) => !keptIds.has(model.id) && !offered.has(model.id))
     if (added.length === 0) {
-      return { kind: 'rebuilt', ns: namespace.ns, addedModels: [], keptModels: currentIds.length, backupPath: '(no write)', offeredModels: [...new Set([...currentIds, ...target.models.map((m) => m.id)])] }
+      return { kind: 'rebuilt', ns: namespace.ns, addedModels: [], keptModels: currentIds.length, backupPath: '(no write)', offeredModels: [...new Set([...currentIds, ...target.models.map((m) => m.id)])], skippedInternal }
     }
     target.models = [...currentIds.map((id) => target.models.find((model) => model.id === id) ?? { id }), ...added]
     const snapshot = snapshotPatch(patchPath)
@@ -343,7 +385,8 @@ export async function seedProvider(options: SeedOptions): Promise<SeedOutcome> {
       addedModels: added.map((model) => model.id),
       keptModels: currentIds.length,
       backupPath: snapshot.backupPath,
-      offeredModels: [...new Set([...currentIds, ...target.models.map((model) => model.id)])]
+      offeredModels: [...new Set([...currentIds, ...target.models.map((model) => model.id)])],
+      skippedInternal
     }
   }
 
@@ -359,5 +402,121 @@ export async function seedProvider(options: SeedOptions): Promise<SeedOutcome> {
     rollbackPatch(snapshot)
     return { kind: 'rolled-back', ns: namespace.ns, reasons: verdict.reasons, backupPath: snapshot.backupPath }
   }
-  return { kind: 'created', ns: namespace.ns, modelCount: target.models.length, backupPath: snapshot.backupPath, offeredModels: target.models.map((model) => model.id) }
+  return { kind: 'created', ns: namespace.ns, modelCount: target.models.length, backupPath: snapshot.backupPath, offeredModels: target.models.map((model) => model.id), skippedInternal }
+}
+
+/**
+ * Read the model ids the user's provider entry currently declares.
+ *
+ * Read-only, and the ONLY way the plugin can tell "what is in the entry" apart
+ * from "what the live directory says" — the two differ exactly in the case this
+ * matters: an entry written by an earlier version still carries the internal
+ * components this version refuses to write, and nothing would ever remove them
+ * without a read like this one.
+ */
+export function currentProviderModelIds(settings: SettingsServiceLike | undefined, providerName: string): string[] {
+  const namespace = findProviderNamespace(settings)
+  if (namespace === undefined) return []
+  const entry = namespace.providers[providerName] as { models?: { id?: unknown }[] } | undefined
+  if (!Array.isArray(entry?.models)) return []
+  return entry.models.map((model) => model?.id).filter((id): id is string => typeof id === 'string')
+}
+
+/**
+ * What a prune did — including the ids it removed, because "which ones went" is
+ * the whole audit trail for a delete the user asked for once and cannot undo
+ * except from the backup.
+ */
+export type PruneOutcome =
+  | { kind: 'pruned'; ns: string; removed: string[]; keptModels: number; backupPath: string }
+  | { kind: 'nothing'; ns: string; detail: string; keptModels: number }
+  | { kind: 'absent'; ns: string; detail: string }
+  | { kind: 'no-namespace'; detail: string }
+  | { kind: 'no-guard'; detail: string }
+  | { kind: 'rolled-back'; ns: string; reasons: string[]; backupPath: string }
+  | { kind: 'failed'; detail: string }
+
+/**
+ * Remove ONLY the entry rows the caller judged internal — the explicit clean-up
+ * for an entry an earlier version already wrote.
+ *
+ * ## Why this is a separate, clickable action and not part of seeding
+ *
+ * The 79-row entries already on disk were written before this plugin had a
+ * criterion, and they will not fix themselves: `seedProvider` reports `present`
+ * and deliberately writes nothing, because a user's pruning is theirs. So the
+ * junk has to be removable WITHOUT the plugin ever deciding on its own to delete
+ * from user configuration — that is what this function is for, and it runs only
+ * when `POST /models/prune-internal` is called, i.e. when someone clicked the
+ * button.
+ *
+ * ## The three properties that make deleting safe
+ *
+ *   ① **Only ids on the caller's internal list are candidates.** Rows the user
+ *      deleted are not rows at all, and rows still present that the criterion
+ *      called `chat` are never touched — a model the user pruned stays pruned and
+ *      a model they kept stays kept.
+ *   ② **Nothing is written without the guard.** Snapshot outside the profile,
+ *      write, re-read, demand the provider really holds exactly the rows we meant
+ *      to leave (`verifyPatch`), and put the file back verbatim if any of that
+ *      fails. This is the same sequence every other write in this plugin uses.
+ *   ③ **An empty candidate list is not a write.** With nothing to remove there is
+ *      no snapshot, no `mutate` and no mtime change; the answer says so.
+ *
+ * Everything else in the entry (`displayName`, `api`, `baseURL`, `headers`, and
+ * every model row) is carried through untouched: the object written back is the
+ * current one with `models` replaced, not a profile this module rebuilt.
+ */
+export async function pruneInternalModels(options: {
+  settings: SettingsServiceLike | undefined
+  pluginName: string
+  providerName: string
+  /** Ids the LIVE directory judged internal. Only these may be removed. */
+  internalIds: readonly string[]
+}): Promise<PruneOutcome> {
+  const { settings } = options
+  if (settings === undefined || typeof settings.describe !== 'function' || typeof settings.mutate !== 'function') {
+    return { kind: 'no-namespace', detail: 'settings 服务不可用（describe/mutate 缺失）' }
+  }
+  const namespace = findProviderNamespace(settings)
+  if (namespace === undefined) {
+    return { kind: 'no-namespace', detail: `没有任何「根级 providers 是 dict」的命名空间。看到的条目：${probeNamespaces(settings)}` }
+  }
+  const current = namespace.providers[options.providerName]
+  if (current === undefined) {
+    return { kind: 'absent', ns: namespace.ns, detail: `providers.${options.providerName} 不存在 —— 没有可清理的条目` }
+  }
+  const entry = typeof current === 'object' && current !== null && !Array.isArray(current) ? (current as Record<string, unknown>) : {}
+  const rows = Array.isArray(entry['models']) ? (entry['models'] as unknown[]) : []
+  const wanted = new Set(options.internalIds)
+  const idOf = (row: unknown): string | undefined => {
+    const id = typeof row === 'object' && row !== null && !Array.isArray(row) ? (row as Record<string, unknown>)['id'] : undefined
+    return typeof id === 'string' ? id : undefined
+  }
+  const removed = rows.map(idOf).filter((id): id is string => id !== undefined && wanted.has(id))
+  if (removed.length === 0) {
+    return { kind: 'nothing', ns: namespace.ns, detail: '你的条目里没有被判定为内部组件的模型（要么已经清过了，要么这份条目里本来就没有）', keptModels: rows.length }
+  }
+  const kept = rows.filter((row) => {
+    const id = idOf(row)
+    return id === undefined || !wanted.has(id)
+  })
+  const patchPath = resolvePatchPath(options.pluginName)
+  if (patchPath === undefined) {
+    return { kind: 'no-guard', detail: `找不到本 profile 的 cordis.patch.yml（plugin=${options.pluginName}），已放弃写入 —— 没有退路就不改用户配置` }
+  }
+  const target = { ...entry, models: kept }
+  const snapshot = snapshotPatch(patchPath)
+  try {
+    await settings.mutate(namespace.ns, [{ op: 'set', path: ['providers', options.providerName], value: target }], namespace.revision)
+  } catch (error) {
+    rollbackPatch(snapshot)
+    return { kind: 'failed', detail: `写入抛出：${error instanceof Error ? error.message : String(error)}（已回滚）` }
+  }
+  const verdict = verifyPatch(snapshot, { provider: options.providerName, expectedModelCount: kept.length })
+  if (!verdict.ok) {
+    rollbackPatch(snapshot)
+    return { kind: 'rolled-back', ns: namespace.ns, reasons: verdict.reasons, backupPath: snapshot.backupPath }
+  }
+  return { kind: 'pruned', ns: namespace.ns, removed, keptModels: kept.length, backupPath: snapshot.backupPath }
 }

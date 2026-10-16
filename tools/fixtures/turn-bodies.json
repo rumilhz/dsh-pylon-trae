@@ -1,7 +1,7 @@
 {
   "schema": "dsh-pylon-trae/turn-bodies@1",
   "generatedBy": "tools/emit-turn-bodies.mjs",
-  "generatedAt": "2026-10-15T03:38:35.300Z",
+  "generatedAt": "2026-10-16T13:45:16.768Z",
   "verificationTarget": {
     "kind": "source",
     "module": "src/protocol.ts",
@@ -9,7 +9,7 @@
     "why": "package.json main is ./src/index.ts (the host strips types, so source is the shipped artifact) and lib/ holds only the browser settings card",
     "digests": {
       "src/protocol.ts": "de8bc5231ed89844b09fb9ccba46746f391d50e911bf401754f915e84c59c85a",
-      "src/catalog.ts": "1587e8a002c50f14bb2f7505550d678f50548480e0878726f8b14f1255cada77",
+      "src/catalog.ts": "1a3bb735bc8dc2e03f597d6d6ccd2cf49d4994111104a3b54ee357d0a410dd8e",
       "src/format.ts": "841e5b893f6127bd8b81ad8d90b42ed897242d00f53796dc289e352d047daa14"
     }
   },

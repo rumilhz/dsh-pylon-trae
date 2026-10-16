@@ -13,6 +13,7 @@
 import { isExpired, type TraeCredential } from './auth.ts'
 import {
   buildTraeHeaders,
+  partitionModels,
   REGION_GATEWAYS,
   TRAE_SOLO_CHAT_PATH,
   traeEndpoint,
@@ -22,7 +23,7 @@ import {
 import type { TraeIdentity } from './identity.ts'
 import type { TraeRegion } from './paths.ts'
 import { buildTraeBody, decodeTraeEvent, parseSseStream } from './protocol.ts'
-import type { SeedOutcome } from './seed.ts'
+import type { PruneOutcome, SeedOutcome } from './seed.ts'
 
 export interface TraeAccountInfo {
   id: string
@@ -87,6 +88,25 @@ export interface ApiDeps {
    * composition without it answers a readable refusal instead of throwing.
    */
   reload?(): Promise<ReloadResult>
+  /**
+   * The ids the user's provider entry still carries that the live directory judges
+   * internal — the "there is junk in your entry" fact, read-only.
+   *
+   * Separate from {@link models} on purpose: the catalogue says what Trae OFFERS,
+   * this says what the user's configuration currently CONTAINS, and they differ
+   * exactly for an entry written before this plugin had a criterion. Optional, so
+   * a composition without a settings face answers `[]` instead of throwing — and
+   * `[]` here is honest: with no readable entry there is demonstrably nothing
+   * this plugin can see to remove.
+   */
+  internalInEntry?(): Promise<string[]>
+  /**
+   * The DELETE half: remove the internal components from the entry. Optional for
+   * the same reason `reload` is (the offline harnesses build their own ApiDeps);
+   * without it `POST /models/prune-internal` answers a readable refusal and writes
+   * nothing.
+   */
+  pruneInternal?(): Promise<PruneOutcome>
   fetchImpl?: typeof fetch
 }
 
@@ -104,6 +124,48 @@ export interface ApiResponse {
 
 const ok = (body: Record<string, unknown>): ApiResponse => ({ status: 200, body: { ok: true, ...body } })
 const bad = (detail: string, status = 200): ApiResponse => ({ status, body: { ok: false, detail } })
+
+/**
+ * One catalogue row, as every model route answers with it.
+ *
+ * `kind` is on EVERY row, not only on the ones that are internal: a consumer that
+ * filters on `kind === 'chat'` and one that filters on `kind !== 'chat'` must
+ * both be able to, and "the field is missing" must never be a third answer to
+ * "is this a conversation model". `internalReason` is added only where it exists
+ * (see `classifyDirectoryEntry`) so the field's presence is itself meaningful.
+ */
+function describeModel(model: TraeModel): Record<string, unknown> {
+  return {
+    id: model.id,
+    name: model.name,
+    kind: model.kind,
+    contextWindow: model.contextWindow ?? null,
+    maxTokens: model.maxTokens ?? null,
+    input: [...model.input],
+    directoryFunction: model.directoryFunction,
+    ...(model.internalReason === undefined ? {} : { internalReason: model.internalReason })
+  }
+}
+
+/**
+ * The ids in the user's entry that the live directory judges internal — never a
+ * throw.
+ *
+ * A missing dep and a failing read both answer `[]`, and both are honest: this
+ * number is only ever used to decide whether to OFFER a clean-up and how many
+ * rows it would touch, and a list this plugin failed to read must not become a
+ * count of rows it claims are there.
+ */
+async function readInternalInEntry(deps: ApiDeps): Promise<string[]> {
+  const read = deps.internalInEntry
+  if (read === undefined) return []
+  try {
+    const ids = await read()
+    return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string' && id !== '') : []
+  } catch {
+    return []
+  }
+}
 
 /** A short, non-secret description of the active credential. */
 function describeCredential(credential: TraeCredential): Record<string, unknown> {
@@ -457,10 +519,30 @@ export async function handleApi(request: ApiRequest, deps: ApiDeps): Promise<Api
       // Absent (not empty-string) when there is nothing to warn about, so
       // `'accountWarning' in body` is itself the question "is there a problem?".
       const warning = deps.accountWarning?.()
+      // The catalogue's own split, computed ONCE here so the three counts on this
+      // answer cannot disagree with each other or with `GET /models`.
+      const catalogue = partitionModels(deps.models())
+      const entryInternalIds = await readInternalInEntry(deps)
       return ok({
         region: deps.region,
         port: deps.port,
         modelCount: deps.models().length,
+        /**
+         * 「对话模型 N 个」and「另有 M 个内部组件已隐藏」.
+         *
+         * Both are on the answer the card already polls, because the alternative —
+         * a second request on mount — is a request the card does not need to make
+         * for two numbers that come from data this handler already holds.
+         *
+         * `entryInternalIds` answers a DIFFERENT question: how many internal
+         * components are still sitting in the user's own provider entry (an entry
+         * written before this plugin had a criterion). It is read from settings, so
+         * a composition without them reports `[]` — "nothing I can see to remove",
+         * never a fabricated count.
+         */
+        chatCount: catalogue.chat.length,
+        internalCount: catalogue.internal.length,
+        entryInternalIds,
         credential: describeCredential(credential),
         /**
          * The plugin's own verdict on the deadline, next to the deadline itself.
@@ -487,15 +569,55 @@ export async function handleApi(request: ApiRequest, deps: ApiDeps): Promise<Api
     }
 
     if (request.method === 'GET' && path === '/models') {
+      // DEFAULT VIEW = the conversation models only, because that is what this
+      // plugin is for: a row that is not a model is not something to offer. The
+      // internal components are not hidden from the operator — they are COUNTED
+      // here, LISTED by id, and shown in full (with the reason each one was judged)
+      // by `GET /models/all` below.
+      const catalogue = partitionModels(deps.models())
       return ok({
-        models: deps.models().map((model) => ({
-          id: model.id,
-          name: model.name,
-          contextWindow: model.contextWindow ?? null,
-          maxTokens: model.maxTokens ?? null,
-          input: [...model.input],
-          directoryFunction: model.directoryFunction
-        }))
+        models: catalogue.chat.map(describeModel),
+        chatCount: catalogue.chat.length,
+        internalCount: catalogue.internal.length,
+        internalIds: catalogue.internalIds,
+        entryInternalIds: await readInternalInEntry(deps)
+      })
+    }
+
+    if (request.method === 'GET' && path === '/models/all') {
+      // 🔎 DIAGNOSTIC ONLY — read-only, never written anywhere, and the one answer
+      // that carries `internalReason`. It exists so "why is model X missing from my
+      // list?" is a question with a printable answer instead of a guess.
+      const catalogue = partitionModels(deps.models())
+      return ok({
+        models: [...catalogue.chat, ...catalogue.internal].map(describeModel),
+        chatCount: catalogue.chat.length,
+        internalCount: catalogue.internal.length,
+        internalIds: catalogue.internalIds,
+        entryInternalIds: await readInternalInEntry(deps)
+      })
+    }
+
+    if (request.method === 'POST' && path === '/models/prune-internal') {
+      // The ONE route that deletes from user configuration, and it only ever runs
+      // because someone clicked a button: there is no timer, no boot hook and no
+      // auto-repair path that reaches `deps.pruneInternal`. What may be removed is
+      // decided by the LIVE catalogue's verdict (src/seed.ts intersects it with the
+      // entry and refuses to touch anything else), and the write goes through the
+      // same guard as seeding — snapshot, write, re-read, roll back.
+      //
+      // The answer names every id it removed. A delete the user cannot enumerate is
+      // indistinguishable from a bug, and the backup path comes with it so the
+      // exact previous file is reachable.
+      const prune = deps.pruneInternal
+      if (prune === undefined) {
+        return bad('这个进程没有接上「移除内部组件」的实现（未注入 pruneInternal）：没有改动任何配置')
+      }
+      const outcome = await prune()
+      return ok({
+        kind: outcome.kind,
+        ...(outcome.kind === 'pruned' || outcome.kind === 'nothing' ? { removed: outcome.kind === 'pruned' ? outcome.removed : [] } : {}),
+        outcome
       })
     }
 

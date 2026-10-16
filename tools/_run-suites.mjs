@@ -45,6 +45,9 @@ const SUITES = [
   // transport is injected), no real token, and every write inside a temp directory.
   ...(existsSync(join(HERE, 'test-auth.ts')) ? [['credential expiry + refresh (offline)', 'test-auth.ts', []]] : []),
   ...(existsSync(join(HERE, 'test-reasoning.ts')) ? [['reasoning mapping (offline)', 'test-reasoning.ts', []]] : []),
+  // 目录分类：哪些 config_name 是对话模型、哪些是 Trae IDE 自己的流程组件。输入是
+  // 2026-10-16 从 CN 网关实测下来的 79 条，冻结在套件里，所以它不需要网关、不花额度。
+  ...(existsSync(join(HERE, 'test-catalog.ts')) ? [['model directory classification (offline)', 'test-catalog.ts', []]] : []),
   // SSE framing on its own (offline): the end-of-stream residual line (D11) and the
   // bare `data` line (D5) are asserted here directly, so a parser change fails in a
   // suite that names the behaviour instead of only in the contract ledger.

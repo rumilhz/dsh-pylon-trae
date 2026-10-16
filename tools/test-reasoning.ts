@@ -50,7 +50,12 @@ const SEED_CODE = {
   display_contact_config:
     '{"access":{"data":{"identity_list":[0,5,1,2,3,100]}},"activity_discount":{"enable":true,"subKey":"subsidy_member_discount","data":{"current":{"discount_type":"subsidy","before_consumption_rate":0.12,"consumption_rate":0.06,"discount":50},"member":{"before_consumption_rate":0.12,"after_consumption_rate":0.03,"discount":25},"subsidy":{"before_consumption_rate":0.12,"after_consumption_rate":0.06,"discount":50}}},"consumption_rate":{"enable":true,"data":{"rate":0.06}},"multimodal":{"enable":true},"reasoning":{"enable":true}}',
   model_detail_list: [{ model_name: 'Doubao-Seed-Code__dev', prompt_max_tokens: 224000, max_tokens: 32000, max_turn: 500 }],
-  reasoning_effort_config: { default_level: 'high', options: ['light', 'high'], support_thinking: true }
+  reasoning_effort_config: { default_level: 'high', options: ['light', 'high'], support_thinking: true },
+  // Verbatim from the live row. `usage` is the FIRST field the conversation-vs-internal
+  // criterion reads (classifyDirectoryEntry, src/catalog.ts), so a partial copy that
+  // omits it makes this real model look like a Trae internal component — which is
+  // exactly what happened when this fixture first met the classifier.
+  usage: 'chat_completion'
 }
 
 /** Same model id, but as `solo_work_remote` lists it: thinking off, no option list. */
@@ -63,7 +68,8 @@ const EVOLVING = {
   display_contact_config:
     '{"access":{"data":{"identity_list":[0,5,1,2,3,100]}},"consumption_rate":{"enable":true,"data":{"rate":0.08}},"multimodal":{"enable":true},"reasoning":{"enable":true}}',
   model_detail_list: [{ model_name: 'Doubao-Seed-Evolving__dev', prompt_max_tokens: 224000, max_tokens: 32000, max_turn: 500 }],
-  reasoning_effort_config: { support_thinking: false }
+  reasoning_effort_config: { support_thinking: false },
+  usage: 'chat_completion'
 }
 
 /**
@@ -91,7 +97,12 @@ const SEED_21_PRO_AGENT = {
   display_config: { display_name: 'Seed-2.1-Pro-0915', model_capability: 'reasoning_model', multimodal: true, is_custom_model: false, max_mode: true },
   display_contact_config: '{"consumption_rate":{"enable":true,"data":{"rate":0.08}},"multimodal":{"enable":true},"reasoning":{"enable":true}}',
   model_detail_list: [{ model_name: 'Doubao-Seed-2.1-Pro__dev', prompt_max_tokens: 224000, max_tokens: 32000, max_turn: 500 }],
-  reasoning_effort_config: { default_level: 'high', options: ['light', 'high'], support_thinking: true }
+  reasoning_effort_config: { default_level: 'high', options: ['light', 'high'], support_thinking: true },
+  // Real row, real `usage` (see the note in SEED_CODE). `custom_model_gemini`'s row
+  // above deliberately keeps the live `custom_model` usage instead, because it IS one
+  // of the 32 internal components — so the two ends of the classification are both
+  // present in this one directory union.
+  usage: 'chat_completion'
 }
 
 /** The same id as SEED_21_PRO_AGENT, but `solo_work_remote` is asked first. */
@@ -130,6 +141,11 @@ check('parseModel carries contextWindow/maxTokens', codeModel?.contextWindow ===
 check('parseModel carries the parsed levels', same(codeModel?.reasoningEfforts, { low: 'light', high: 'high' }))
 check('a model with no declared levels has NO key at all', evolvingModel !== undefined && !('reasoningEfforts' in evolvingModel), JSON.stringify(evolvingModel))
 check('parseModel rejects an entry with no config_name', parseModel({ display_config: {} }, 'solo_work_remote') === undefined)
+// Both of these are REAL conversation models, and the classification has to agree: a
+// model that reaches the profile builder must carry `kind: 'chat'` or the builder
+// (correctly) refuses to write it. Pinned here because a fixture that drifts back to
+// a partial copy of the live row fails at a distance, in a different suite.
+check('both real samples are classified chat', codeModel?.kind === 'chat' && evolvingModel?.kind === 'chat', JSON.stringify([codeModel?.kind, codeModel?.internalReason]))
 // The image claim is READ (from display_config, where the live entry really keeps
 // it) but never turned into an `image` modality — see section [7].
 const geminiModel = parseModel(GEMINI_CUSTOM, 'solo_work_remote')
@@ -216,6 +232,11 @@ const unionProfile = buildProviderProfile({ displayName: 'Trae', baseUrl: 'http:
 const reasoningRows = unionProfile.models.filter((row) => row.reasoningEfforts !== undefined)
 check('exactly the merged models get a reasoning row', reasoningRows.length === 2 && reasoningRows.map((row) => row.id).sort().join(',') === 'Doubao-Seed-2.1-Pro,Doubao-Seed-Code', reasoningRows.map((row) => row.id).join(','))
 check('the other rows are byte-identical to a no-reasoning build', same(unionProfile.models.filter((row) => row.reasoningEfforts === undefined), buildProviderProfile({ displayName: 'x', baseUrl: 'b', token: 't', models: union.models.filter((model) => model.id !== 'Doubao-Seed-Code' && model.id !== 'Doubao-Seed-2.1-Pro') }).models))
+// The same union, seen through the classification: the two real models reach the
+// profile, and the one internal component (`custom_model_gemini` — usage
+// `custom_model`, one of the 32 measured on 2026-10-16) stops at the catalogue.
+check('the union carries both verdicts, and only the chat half reaches the profile', byId.get('Doubao-Seed-2.1-Pro')?.kind === 'chat' && byId.get('Doubao-Seed-Code')?.kind === 'chat' && byId.get('custom_model_gemini')?.kind === 'internal', JSON.stringify([...byId.values()].map((model) => `${model.id}:${model.kind}`)))
+check('...so the profile has 3 rows, not 4', unionProfile.models.length === 3 && !unionProfile.models.some((row) => row.id === 'custom_model_gemini'), unionProfile.models.map((row) => row.id).join(','))
 
 const typedRows: ProviderProfileModel[] = unionProfile.models
 check('the profile type still accepts every row', typedRows.length === unionProfile.models.length)

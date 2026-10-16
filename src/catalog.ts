@@ -39,6 +39,190 @@ export const TRAE_APP_ID = '6eefa01c-1036-4c7e-9ca5-d891f63bfcd8'
 /** Numeric build code the gateway accepts when the persisted build is dotted. */
 export const TRAE_VERSION_CODE_FALLBACK = '20260716'
 
+/**
+ * ═══════════════ 「对话模型」还是「IDE 内部流程组件」 ═══════════════
+ *
+ * 症状（委托方报告，2026-10-16）：写进「设置 → 模型」的 79 条里混着 Trae IDE 自己的
+ * 流程组件 —— `title_generation`（起标题）· `input_optimization`（优化输入）·
+ * `fast_apply`（快速套用）· `search_agent_qwen_fast`（搜索）· `custom_model_gpt-6`
+ * （占位槽）· `glm-5.2_advisor_doubao`（顾问模式）…… 它们都是**真的可调用的
+ * config_name**（所以它们确实能调通），但**不是对话模型**，出现在模型选择器里就是
+ * 垃圾项。
+ *
+ * ─────────────────── 判据出处：实测 CN 网关目录，2026-10-16 ───────────────────
+ *
+ * `POST /api/ide/v1/get_detail_param`，四个 function 各答一次
+ * （`solo_work_remote` 45 行 · `solo_agent_remote` 37 行 · `chat_v3` 46 行 ·
+ * `solo_coder` 41 行），合计 **169 行 / 79 个不重复 config_name**。逐条 dump 之后，
+ * 79 条里**唯一**声明「这个 config_name 是干什么用的」的字段是
+ * `config_info_list[i].usage`：
+ *
+ *     chat_completion 56 · custom_model 18 · summary 1 · fast_apply 1 ·
+ *     fast_apply_new 1 · title_generation 1 · input_optimization 1      = 79
+ *
+ * `chat_completion`（对话补全）是其中**唯一**表示「这个 config_name 在回答一次对话」
+ * 的取值；其余五个取值是 Trae 自己给的用途名，逐字对应它 IDE 里的流程组件。
+ *
+ * 光看 `usage` 不够：`search_agent_qwen_fast` / `glm-5.2_advisor_doubao` 这类**别名槽**
+ * 声明的用途也是 `chat_completion`。分开它们的是第二个字段
+ * `config_info_list[i].model_detail_list[0].model_name` —— Trae 真正发给上游的模型名，
+ * 79 条**全部**都有：
+ *
+ *     真模型   model_name = `<config_name>__dev` / `<config_name>__max`
+ *     别名槽   model_name 落在**别的**模型（或别的组件）上：
+ *              glm-5.1_advisor       → glm-5.1__dev              （与 glm-5.1 同一个线上模型）
+ *              glm-5.2_advisor_default → glm-5.2__dev            （与 glm-5.2 同一个线上模型）
+ *              glm-5.2_advisor_doubao  → glm-5.2__dev            （同上）
+ *              search_agent_qwen_fast → search_agent_model__max
+ *              browser_use_subagent   → browser_use_model__dev
+ *              explore_sub_agent_v2   → qwen-3.6-explore-agent__dev
+ *              file_search_agent      → file-search-qwen3.6__dev
+ *              seed-code-pro-0430     → Doubao-Seed-2.1-Pro__dev
+ *
+ * 一句话：**一个 config_name 如果连自己的线上模型名里都不出现，它就不是一个模型，而是
+ * 别的东西的槽位**。这就是规则 ②。
+ *
+ * ## 规则 ② 在「同一个 id 被多个 function 列出」时怎么判：任一行成立就算 chat
+ *
+ * 判据的**逐行**形式就是 {@link classifyDirectoryEntry}；同一个 id 会被最多四个
+ * function 各列一次，而这几行会互相矛盾 —— 实测（CN，2026-10-16，同样的 169 行 / 79
+ * 个 id）：
+ *
+ *     DeepSeek-V4-Flash     solo_work_remote → deepseek_v4_flash__dev     （别名，判 internal）
+ *                           solo_agent_remote / chat_v3 / solo_coder → DeepSeek-V4-Flash__dev
+ *     DeepSeek-V4-Pro       solo_work_remote → deepseek_v4_pro__dev       （别名）
+ *                           solo_agent_remote / chat_v3 / solo_coder → DeepSeek-V4-Pro__dev
+ *     Doubao-Seed-2.0-Code  solo_work_remote → Doubao-Seed-2.1-Turbo__dev （别名）
+ *                           solo_coder       → Doubao-Seed-2.0-Code__max
+ *
+ * `solo_work_remote` 是**第一个**被问的 function（src/format.ts），所以「保留第一行」
+ * 会让用户模型清单的数量取决于网关先答哪一行：实测同一份目录，**前一分钟 47 个、后一
+ * 分钟 44 个**，三个真模型被静默丢掉。因此 `kind` 在合并时取「**任意一行说它是自己的
+ * 模型就算 chat**」（{@link mergeRicher} 里唯一一个朝 chat 单调的字段），判据于是成为
+ * 目录的属性、与回答顺序无关。
+ *
+ * 反方向的错误（某个流程组件靠名字巧合被提成 chat）也实测过：**32 个 internal id 的
+ * 全部 169 行里，没有一行**的 `model_name` 含自己的 config_name（整份名单冻结在
+ * `tools/test-catalog.ts` 的 `INTERNAL_ROSTER`）。所以这条 OR 漏不进组件，只会少丢模型。
+ *
+ * 命中数（CN，2026-10-16，任一行为准）：internal **32** / chat **47**（32+47 = 79）。
+ * 32 个 id 全列在 {@link TRAE_INTERNAL_KINDS_DOC}。
+ *
+ * 规则 ①（usage）命中 23 个：summary · fast_apply · fast_apply_new · title_generation ·
+ * input_optimization + 18 个 `custom_model_*`。
+ * 规则 ②（线上模型名）另命中 9 个：browser_use_subagent · explore_sub_agent_v2 ·
+ * file_search_agent · search_agent_qwen_fast · search_agent_qwen_fast-0710 ·
+ * glm-5.1_advisor · glm-5.2_advisor_default · glm-5.2_advisor_doubao · seed-code-pro-0430。
+ *
+ * ─────────────────── 上游做了没有？—— 没有做等价的事 ───────────────────
+ *
+ * 钉死的 `dsh-connect-trae@3.4.0` lib/index.js **没有**任何按用途/类型的过滤：
+ *   · `collectModels`（:2604-2640）只读 `config_name` / `display_config` /
+ *     `model_detail_list` / `context_window_tokens`，把每一条都收进目录；
+ *   · 它唯一的两个过滤都与用途无关：`sanitizeCatalog`（:283-290）丢掉自己早期版本造的
+ *     `@1m` 变体，`dropDeadModels`（:5303）按「线上可调用的 key」过滤。
+ *   · 它的 `fetchModels` 注释（:2571-2578）写着 "The remote directory remains the merge
+ *     skeleton, so agent-internal entries (search_agent_*, paygo variants) never surface
+ *     even though they appear here." —— 即上游**知道**这些条目会出现，靠的是「以 Remote
+ *     用户面目录为骨架」这一条**结构性**假设，不是字段判据。本插件只用
+ *     `get_detail_param`（设计稿 §5），没有那层骨架，所以必须自己判。
+ *
+ * 我们也试过上游那条路，并**放弃了**：拿 `GET {remote}/models` 的用户面目录（实测 32 个
+ * 名字）与 79 个 config_name 求交，只剩 **30** 个 —— 它连 `glm-4.6` · `glm-4.7` ·
+ * `kimi-k2` · `kimi-k2-0905` · `minimax-m2` · `minimax-m2.1` · `qwen3-coder` 这些**真
+ * 模型**（Trae 已从自己的选择器下架、但账户仍可调用）一起丢掉。那是一次回归，不是这次
+ * 委托要修的东西。所以判据留在本文件的字段上，离线可复现、不需要第二次网关调用。
+ *
+ * ─────────────────── 边界（缺字段 / 畸形行）───────────────────
+ *
+ * 一个既读不出 `usage`、也读不出 `model_name` 的条目**无法被证明**是对话模型，因此判为
+ * internal（而不是 chat）。方向是刻意的：隐藏一个真模型的代价是「用户少看到一个选项」，
+ * 而放进来一个流程组件的代价正是这次的投诉；而且被隐藏的 id 会经 `SeedOutcome.
+ * skippedInternal`、`GET /models/all`、`boot.log` 三处报出来，所以这个方向是**可发现、
+ * 可撤回**的。反过来（缺字段就当 chat）是静默地把垃圾写进用户配置。
+ */
+export const TRAE_CHAT_USAGE = 'chat_completion'
+
+/** The 32 ids the criterion judged internal on the live CN directory, 2026-10-16. */
+export const TRAE_INTERNAL_KINDS_DOC = [
+  'browser_use_subagent',
+  'custom_model_1M',
+  'custom_model_1M_text',
+  'custom_model_200k',
+  'custom_model_200k_text',
+  'custom_model_claude',
+  'custom_model_deepseek_chat',
+  'custom_model_deepseek_reasoner',
+  'custom_model_deepseek_v4',
+  'custom_model_doubao_1M',
+  'custom_model_doubao_256k',
+  'custom_model_gemini',
+  'custom_model_gpt-5',
+  'custom_model_gpt-6',
+  'custom_model_kimi',
+  'custom_model_no-fc',
+  'custom_model_placeholder',
+  'custom_model_vercel',
+  'custom_model_vercel_gemini',
+  'explore_sub_agent_v2',
+  'fast_apply',
+  'fast_apply_new',
+  'file_search_agent',
+  'glm-5.1_advisor',
+  'glm-5.2_advisor_default',
+  'glm-5.2_advisor_doubao',
+  'input_optimization',
+  'search_agent_qwen_fast',
+  'search_agent_qwen_fast-0710',
+  'seed-code-pro-0430',
+  'summary',
+  'title_generation'
+] as const
+
+/** `chat` = 一次对话的模型；`internal` = Trae IDE 自己的流程/别名槽位。 */
+export type TraeModelKind = 'chat' | 'internal'
+
+export interface TraeModelClassification {
+  kind: TraeModelKind
+  /** 为什么判成 internal（给人读的一句话）；`chat` 时不存在。 */
+  internalReason?: string
+}
+
+/** `model_detail_list[0].model_name` — the model name Trae really sends upstream. */
+export function wireModelName(entry: unknown): string | undefined {
+  const config = recordOf(entry)
+  if (config === undefined) return undefined
+  const details = Array.isArray(config['model_detail_list']) ? config['model_detail_list'] : []
+  const name = recordOf(details[0])?.['model_name']
+  return typeof name === 'string' && name.trim() !== '' ? name.trim() : undefined
+}
+
+/**
+ * Judge ONE `config_info_list` entry: see the block comment above for the criterion,
+ * its source, its measured hit count, and why the boundary leans towards `internal`.
+ *
+ * Pure and total: any JSON value is an answer, never a throw.
+ */
+export function classifyDirectoryEntry(entry: unknown, id: string): TraeModelClassification {
+  const config = recordOf(entry)
+  if (config === undefined) return { kind: 'internal', internalReason: '条目不是对象：读不出用途，无法证明它是对话模型' }
+  const usage = config['usage']
+  if (typeof usage !== 'string' || usage.trim() === '') {
+    return { kind: 'internal', internalReason: '目录没有声明 usage，无法证明它是对话模型' }
+  }
+  if (usage !== TRAE_CHAT_USAGE) {
+    return { kind: 'internal', internalReason: `usage=${usage}（Trae 自己声明的用途不是 ${TRAE_CHAT_USAGE}）` }
+  }
+  const wire = wireModelName(config)
+  if (wire === undefined) {
+    return { kind: 'internal', internalReason: '目录没有给出 model_detail_list[0].model_name，无法证明它是对话模型' }
+  }
+  if (!wire.toLowerCase().includes(id.toLowerCase())) {
+    return { kind: 'internal', internalReason: `线上模型名是 ${wire}，不含自己的 config_name —— 它只是别的东西的槽位` }
+  }
+  return { kind: 'chat' }
+}
+
 export interface TraeModel {
   id: string
   name: string
@@ -85,6 +269,17 @@ export interface TraeModel {
   multimodal?: boolean
   /** The directory function that listed this model (replayed when calling it). */
   directoryFunction: string
+  /**
+   * 对话模型（`chat`）还是 Trae IDE 的内部流程组件（`internal`）。
+   *
+   * 这是**判据的结果**，判据本身与它的出处、命中数、边界方向都在上面那一大段注释和
+   * {@link classifyDirectoryEntry} 里。它是**必需**字段而不是可选标志：一个写漏了
+   * `kind` 的目录行必须被当作「没判过」，而不是被当作 chat —— src/seed.ts 只写
+   * `kind === 'chat'`，所以漏判不会静默地放垃圾进用户配置。
+   */
+  kind: TraeModelKind
+  /** 判成 internal 的原因（给人读）；`chat` 时不存在。 */
+  internalReason?: string
 }
 
 /** The pi-ai thinking levels a Trae entry can advertise, mapped to Trae's wire spelling. */
@@ -157,22 +352,27 @@ export function parseReasoningEfforts(entry: unknown): TraeReasoningEfforts | un
   return Object.keys(efforts).length === 0 ? undefined : efforts
 }
 
-/** Bootstrap rosters, used only while no live directory is available. */
+/**
+ * Bootstrap rosters, used only while no live directory is available.
+ *
+ * Every row is hand-written and is a conversation model by construction, hence
+ * `kind: 'chat'` on all of them — `classifyDirectoryEntry` never runs here.
+ */
 export const FALLBACK_MODELS: Readonly<Record<TraeRegion, readonly TraeModel[]>> = {
   cn: [
-    { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION }
+    { id: 'DeepSeek-V4-Flash-Official', name: 'DeepSeek-V4-Flash', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'DeepSeek-V4-Pro-Official', name: 'DeepSeek-V4-Pro', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' }
   ],
   ai: [
-    { id: 'gemini-3.1-pro', name: 'Gemini-3.1-Pro-Preview', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'gemini-3-flash-solo', name: 'Gemini-3-Flash-Preview', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'minimax-m3', name: 'MiniMax-M3', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'minimax-m2.7', name: 'MiniMax-M2.7', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'kimi-k2.5', name: 'Kimi-K2.5', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'gpt-5.4', name: 'GPT-5.4', contextWindow: 272000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION },
-    { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 272000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION }
+    { id: 'gemini-3.1-pro', name: 'Gemini-3.1-Pro-Preview', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'gemini-3-flash-solo', name: 'Gemini-3-Flash-Preview', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'minimax-m3', name: 'MiniMax-M3', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'minimax-m2.7', name: 'MiniMax-M2.7', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'kimi-k2.5', name: 'Kimi-K2.5', contextWindow: 200000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'gpt-5.4', name: 'GPT-5.4', contextWindow: 272000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' },
+    { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 272000, input: ['text'], directoryFunction: TRAE_SOLO_FUNCTION, kind: 'chat' }
   ]
 }
 
@@ -252,6 +452,7 @@ export function parseModel(raw: unknown, directoryFunction: string): TraeModel |
   const multimodal = typeof rawMultimodal === 'boolean' ? rawMultimodal : undefined
   const displayName = typeof display['display_name'] === 'string' && display['display_name'] !== '' ? display['display_name'] : id
   const reasoningEfforts = parseReasoningEfforts(config)
+  const classification = classifyDirectoryEntry(config, id)
   return {
     id,
     name: displayName,
@@ -260,8 +461,30 @@ export function parseModel(raw: unknown, directoryFunction: string): TraeModel |
     input: ['text'],
     ...(multimodal === undefined ? {} : { multimodal }),
     ...(reasoningEfforts === undefined ? {} : { reasoningEfforts }),
-    directoryFunction
+    directoryFunction,
+    kind: classification.kind,
+    ...(classification.internalReason === undefined ? {} : { internalReason: classification.internalReason })
   }
+}
+
+/**
+ * The live catalogue, split by {@link classifyDirectoryEntry}'s verdict.
+ *
+ * `internalIds` is what src/seed.ts reports as `skippedInternal` and what
+ * `POST /models/prune-internal` is allowed to remove — one derivation, so the
+ * "hidden" count and the "removable" list can never disagree.
+ */
+export function partitionModels(models: readonly TraeModel[]): { chat: TraeModel[]; internal: TraeModel[]; internalIds: string[] } {
+  const chat: TraeModel[] = []
+  const internal: TraeModel[] = []
+  for (const model of models) {
+    // Strict on purpose: only an explicit `chat` is a conversation model. A row that
+    // never went through parseModel (a hand-built literal missing `kind`) is NOT
+    // silently promoted into the user's provider entry.
+    if (model.kind === 'chat') chat.push(model)
+    else internal.push(model)
+  }
+  return { chat, internal, internalIds: internal.map((model) => model.id) }
 }
 
 /**
@@ -274,7 +497,11 @@ export function parseModel(raw: unknown, directoryFunction: string): TraeModel |
  * those models their reasoning levels.
  *
  * The FUNCTION is deliberately NOT part of the merge: wire resolution has to
- * replay the function that owns the id, so it stays first-wins.
+ * replay the function that owns the id, so it stays first-wins. `name` stays
+ * first-wins for the same reason — it is an identity statement, and identity belongs
+ * to the row that owns it. `kind` is the documented EXCEPTION: it is monotone
+ * towards `chat` across the rows that list an id (see the block below), because a
+ * stale alias in the first answer must not be able to hide a real model.
  *
  * Only a field the first row left UNSET can be filled, and never a partial
  * top-up: a first row declaring `{ low: 'light' }` keeps exactly that, even when
@@ -295,7 +522,7 @@ export function parseModel(raw: unknown, directoryFunction: string): TraeModel |
  *     in src/protocol.ts).
  */
 function mergeRicher(base: TraeModel, extra: TraeModel): TraeModel {
-  return {
+  const merged: TraeModel = {
     ...base,
     ...(base.contextWindow === undefined && extra.contextWindow !== undefined ? { contextWindow: extra.contextWindow } : {}),
     ...(base.maxTokens === undefined && extra.maxTokens !== undefined ? { maxTokens: extra.maxTokens } : {}),
@@ -305,6 +532,39 @@ function mergeRicher(base: TraeModel, extra: TraeModel): TraeModel {
     // accepted there — a later `false` is information too.
     ...(base.multimodal === undefined && extra.multimodal !== undefined ? { multimodal: extra.multimodal } : {})
   }
+  if (base.kind === 'chat' || extra.kind !== 'chat') return merged
+  // ── the ONE field that is monotone TOWARDS `chat` ────────────────────────────
+  //
+  // Why the direction is argued rather than copied from the capability rules above:
+  // `solo_work_remote` is asked FIRST (src/format.ts) and it sometimes serves a
+  // STALE wire name for an id the other three functions spell correctly. Measured on
+  // the live CN directory, 2026-10-16, same 169 rows / 79 ids, two calls minutes
+  // apart:
+  //
+  //   DeepSeek-V4-Flash  solo_work_remote → deepseek_v4_flash__dev  (⇒ internal)
+  //                      solo_agent_remote / chat_v3 / solo_coder → DeepSeek-V4-Flash__dev
+  //   DeepSeek-V4-Pro    solo_work_remote → deepseek_v4_pro__dev    (⇒ internal)
+  //                      solo_agent_remote / chat_v3 / solo_coder → DeepSeek-V4-Pro__dev
+  //   Doubao-Seed-2.0-Code  solo_work_remote → Doubao-Seed-2.1-Turbo__dev (⇒ internal)
+  //                         solo_coder       → Doubao-Seed-2.0-Code__max
+  //
+  // First-wins therefore made the size of the user's model list depend on which
+  // answer the gateway happened to return first: the same live directory produced
+  // 47 models one minute and 44 the next, with three REAL models silently dropped.
+  // Taking "some row says this id is its own model" makes the verdict a property of
+  // the DIRECTORY rather than of the answer order.
+  //
+  // The opposite error — a workflow component promoted to chat by a coincidental
+  // name match — was measured over ALL 169 rows: not one of the 32 ids no row
+  // self-identifies for ever has a row whose `model_name` contains it (the full
+  // roster is frozen in `tools/test-catalog.ts`, `INTERNAL_ROSTER`). So the OR
+  // cannot leak a component in; it can only stop losing a model.
+  const chatModel: TraeModel = { ...merged, kind: 'chat' }
+  // The reason belonged to the row that was reading a stale alias; keeping it on a
+  // model the plugin will now publish would be a false accusation, and it must not
+  // survive into `GET /models/all` either.
+  delete chatModel.internalReason
+  return chatModel
 }
 
 /**

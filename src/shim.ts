@@ -39,7 +39,28 @@ export interface ShimOptions {
   token: string
   credential(): Promise<TraeCredential>
   identity(): Promise<TraeIdentity>
+  /** The WHOLE catalogue this shim resolves a request's `model` id against. */
   models(): readonly TraeModel[]
+  /**
+   * The rows `GET /v1/models` may ADVERTISE — not necessarily every row
+   * {@link models} answers with.
+   *
+   * The filter belongs to the CALLER, not to this file, and that is deliberate:
+   * shim.ts moves bytes, so it must not hold a second copy of "what counts as a
+   * conversation model". That criterion lives in `src/catalog.ts`
+   * (`classifyDirectoryEntry` / `partitionModels`), and `src/seed.ts` already
+   * applies it to the provider entry pi-ai reads. `src/index.ts` passes the very
+   * same `partitionModels(models).chat` here, so the ids advertised on this route
+   * ARE the ids the provider entry got — the two surfaces cannot drift apart,
+   * which is the whole point of the option existing.
+   *
+   * CONTRACT: the returned rows are a subset of {@link models}; `GET /healthz`
+   * reports the difference as `internal`.
+   *
+   * Omitted = no filtering (advertise everything `models()` answers), so a
+   * composition that injects only `models()` keeps its old behaviour.
+   */
+  advertisedModels?(): readonly TraeModel[]
   /**
    * The plugin's own API, exposed behind the same bearer on two prefixes:
    * `/admin/*` (our CLI) and `/plugins/dsh-pylon-trae/*` (the shape the settings card
@@ -103,6 +124,13 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 export function createShim(options: ShimOptions): TraeShim {
   const fetchImpl = options.fetchImpl ?? fetch
+  /**
+   * What `GET /v1/models` advertises. Called through `options` every time (never
+   * captured) so the caller's list is read at request time, exactly like
+   * `options.models()`.
+   */
+  const advertised = (): readonly TraeModel[] =>
+    options.advertisedModels === undefined ? options.models() : options.advertisedModels()
   const sockets = new Set<import('node:net').Socket>()
   const server = createServer((req, res) => {
     void handle(req, res)
@@ -142,13 +170,40 @@ export function createShim(options: ShimOptions): TraeShim {
       if (!bearerOk(req)) return writeError(res, 401, 'unauthorized', 'Missing or invalid bearer')
       const url = req.url ?? '/'
       if (req.method === 'GET' && (url === '/healthz' || url === '/healthz/')) {
-        const models = options.models()
-        return writeJson(res, 200, { ok: true, region: options.region, port: options.port, models: models.length })
+        /**
+         * Named parts, never one bare total.
+         *
+         * `models` used to be `options.models().length` — the whole directory — while
+         * `GET /v1/models` below listed only the subset the caller advertises. One
+         * plugin answering "79" here and "47" there reads as "the filter never ran",
+         * and anyone cross-checking the two numbers has no way to tell which one is
+         * the mistake.
+         *
+         * So: `models` is the count this endpoint actually serves on `/v1/models`
+         * (kept under its old name so the existing readers keep working — tools/
+         * doctor.ts identifies our shim by it, tools/coldstart-verify.mjs asserts it
+         * is positive), `chat` is the same number under the classification's own
+         * name, `internal` is how many catalogue rows are deliberately NOT
+         * advertised, and `total` is the catalogue `models()` returns. A reader
+         * comparing `/v1/models` with this answer now sees 47 on both sides.
+         */
+        const total = options.models().length
+        const chat = advertised().length
+        // By contract `advertised()` is a subset of `models()`, so this difference is
+        // the hidden-internal count. The clamp only stops a mis-wired caller from
+        // reporting a NEGATIVE part; a caller that violates the subset contract shows
+        // it as `total !== chat + internal` rather than as a plausible number.
+        const internal = total > chat ? total - chat : 0
+        return writeJson(res, 200, { ok: true, region: options.region, port: options.port, models: chat, chat, internal, total })
       }
       if (req.method === 'GET' && (url === '/v1/models' || url === '/v1/models/')) {
+        // `advertised()`, NOT `options.models()`: the caller decides which rows this
+        // route offers (see `advertisedModels`). The chat route below still resolves
+        // ids against the FULL catalogue on purpose — a user may type an id in
+        // themselves, and passing it upstream is more truthful than refusing it.
         return writeJson(res, 200, {
           object: 'list',
-          data: options.models().map((model) => ({ id: model.id, object: 'model', created: 0, owned_by: `trae-${options.region}` }))
+          data: advertised().map((model) => ({ id: model.id, object: 'model', created: 0, owned_by: `trae-${options.region}` }))
         })
       }
       if (req.method === 'POST' && (url === '/v1/chat/completions' || url === '/v1/chat/completions/')) {

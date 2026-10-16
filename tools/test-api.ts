@@ -43,6 +43,13 @@
  *                 a 200 whose stream carries no recognisable event read as
  *                 inconclusive — no generation is ever sent
  *   · unknown route -> 404 with `ok:false`, and a throwing dep never escapes
+ *   · the SHIM's read routes, over real loopback HTTP (`createShim` on a free port):
+ *                 `GET /v1/models` advertises the caller's filter — the same
+ *                 `partitionModels(...).chat` ids the provider entry got — and those ids
+ *                 are asserted EQUAL to `api.ts`'s `GET /models` ids under one injection;
+ *                 `/healthz` reports the named split (models/chat/internal/total) with the
+ *                 parts summing to the directory; an all-internal catalogue answers an empty
+ *                 list instead of crashing; and injecting no filter stays unfiltered
  *
  * The four fixes of 2026-10-14 (business code on GET /checkin, fabricated
  * `credits: 0`, string business codes, /models/test ordering) each have assertions
@@ -80,14 +87,28 @@
  *     most ten are probed now and the answer says so (`requested` / `tested` /
  *     `truncated`); the no-`modelIds` default (the first five) is unchanged.
  *
+ * This pass closes the leftover inconsistency of "internal component filtering": the
+ * shim's `GET /v1/models` still listed the whole directory (79 ids on the live CN
+ * gateway) while the provider entry pi-ai reads carried the 47 conversation models, and
+ * `/healthz` reduced that to a bare `models: 79` nothing could be checked against. The
+ * advertised list is now the CALLER's filter (`ShimOptions.advertisedModels`, wired in
+ * src/index.ts to the same `partitionModels` verdict src/seed.ts applies), `/healthz`
+ * names `models` / `chat` / `internal` / `total`, and section [9] pins the two surfaces
+ * to the same id set — a `/v1/models` that goes back to listing everything fails there.
+ *
  * Run:  <dsh-node> tools/test-api.ts        exit 0 = every check passed
  */
 import type { TraeCredential } from '../src/auth.ts'
 import type { TraeIdentity } from '../src/identity.ts'
 import type { DirectoryAttempt, TraeModel } from '../src/catalog.ts'
-import type { SeedOutcome } from '../src/seed.ts'
+import type { SeedOutcome, PruneOutcome } from '../src/seed.ts'
 import { readFileSync } from 'node:fs'
+import { request } from 'node:http'
+import { createServer } from 'node:net'
 import { handleApi, type ApiDeps, type ApiRequest, type TraeAccountInfo } from '../src/api.ts'
+import { partitionModels } from '../src/catalog.ts'
+import { buildProviderProfile } from '../src/seed.ts'
+import { createShim } from '../src/shim.ts'
 
 let failures = 0
 let passed = 0
@@ -123,13 +144,13 @@ const CREDENTIAL = {
 const IDENTITY = { edition: 'cn', machineId: 'machine-1', deviceId: 'device-1', appVersion: '3.3.104' } as TraeIdentity
 
 const MODELS: readonly TraeModel[] = [
-  { id: 'm1', name: 'One', contextWindow: 1000, maxTokens: 100, input: ['text'], directoryFunction: 'solo_work_remote' },
-  { id: 'm2', name: 'Two', contextWindow: 2000, maxTokens: 200, input: ['text'], directoryFunction: 'solo_work_remote' },
-  { id: 'm3', name: 'Three', input: ['text'], directoryFunction: 'solo_agent_remote' },
-  { id: 'm4', name: 'Four', contextWindow: 4000, input: ['text'], directoryFunction: 'chat_v3' },
-  { id: 'm5', name: 'Five', contextWindow: 5000, input: ['text'], directoryFunction: 'solo_coder' },
-  { id: 'm6', name: 'Six', contextWindow: 6000, input: ['text'], directoryFunction: 'solo_work_remote' },
-  { id: 'm7', name: 'Seven', contextWindow: 7000, input: ['text'], directoryFunction: 'solo_work_remote' }
+  { id: 'm1', name: 'One', contextWindow: 1000, maxTokens: 100, input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' },
+  { id: 'm2', name: 'Two', contextWindow: 2000, maxTokens: 200, input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' },
+  { id: 'm3', name: 'Three', input: ['text'], directoryFunction: 'solo_agent_remote', kind: 'chat' },
+  { id: 'm4', name: 'Four', contextWindow: 4000, input: ['text'], directoryFunction: 'chat_v3', kind: 'chat' },
+  { id: 'm5', name: 'Five', contextWindow: 5000, input: ['text'], directoryFunction: 'solo_coder', kind: 'chat' },
+  { id: 'm6', name: 'Six', contextWindow: 6000, input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' },
+  { id: 'm7', name: 'Seven', contextWindow: 7000, input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' }
 ]
 
 /**
@@ -142,14 +163,31 @@ const MANY_MODELS: readonly TraeModel[] = Array.from({ length: 79 }, (_, index) 
   name: `X${String(index + 1).padStart(2, '0')}`,
   contextWindow: 1000,
   input: ['text'],
-  directoryFunction: 'solo_work_remote'
+  directoryFunction: 'solo_work_remote',
+  kind: 'chat' as const
 }))
+
+/**
+ * A directory shaped like the real one: conversation models AND internal workflow
+ * components, so the classification routes have something to classify. The two
+ * internal rows carry the reasons `classifyDirectoryEntry` really produces, and the
+ * ids are two of the 32 measured on 2026-10-16.
+ */
+const MIXED_MODELS: readonly TraeModel[] = [
+  { id: 'glm-5.2', name: 'GLM-5.2', contextWindow: 116000, maxTokens: 16000, input: ['text'], directoryFunction: 'solo_work_remote', kind: 'chat' },
+  { id: 'kimi-k2.6', name: 'Kimi-K2.6', contextWindow: 200000, input: ['text'], directoryFunction: 'chat_v3', kind: 'chat' },
+  { id: 'title_generation', name: 'title_generation', contextWindow: 44096, input: ['text'], directoryFunction: 'chat_v3', kind: 'internal', internalReason: 'usage=title_generation（Trae 自己声明的用途不是 chat_completion）' },
+  { id: 'glm-5.2_advisor_doubao', name: 'GLM-5.2', contextWindow: 116000, input: ['text'], directoryFunction: 'chat_v3', kind: 'internal', internalReason: '线上模型名是 glm-5.2__dev，不含自己的 config_name —— 它只是别的东西的槽位' }
+]
 
 const ACCOUNTS: TraeAccountInfo[] = [
   { id: 'desktop/cn', userId: '357806796716699', accountName: 'tester', edition: 'cn', source: 'desktop', expiresAtMs: 1792000000000, active: true }
 ]
 
-const REFRESH_OUTCOME: SeedOutcome = { kind: 'rebuilt', ns: 'llm-pi-ai', addedModels: ['m7'], keptModels: 6, backupPath: '/tmp/backup.yml', offeredModels: ['m1'] }
+const REFRESH_OUTCOME: SeedOutcome = { kind: 'rebuilt', ns: 'llm-pi-ai', addedModels: ['m7'], keptModels: 6, backupPath: '/tmp/backup.yml', offeredModels: ['m1'], skippedInternal: [] }
+
+/** What `deps.pruneInternal` answers by default: nothing was there to remove. */
+const PRUNE_NOTHING: PruneOutcome = { kind: 'nothing', ns: 'llm-pi-ai', detail: '你的条目里没有被判定为内部组件的模型', keptModels: 7 }
 
 /** One entry per directory function, in the wording `fetchDirectoryModels` produces. */
 const RELOAD_ATTEMPTS: DirectoryAttempt[] = [
@@ -189,6 +227,8 @@ function deps(overrides: Partial<ApiDeps> = {}): ApiDeps {
     selectAccount: async (accountId: string) => (accountId === 'cli/cn' ? { ok: false, detail: '凭据已过期' } : { ok: true }),
     refresh: async () => ({ outcome: REFRESH_OUTCOME, modelCount: 7 }),
     reload: async () => ({ ok: true, modelCount: MODELS.length, attempts: RELOAD_ATTEMPTS }),
+    internalInEntry: async () => [],
+    pruneInternal: async () => PRUNE_NOTHING,
     ...overrides
   }
 }
@@ -283,9 +323,83 @@ console.log('\n[2] GET /models')
   const response = await handleApi(get('/models'), deps())
   const models = response.body['models'] as Record<string, unknown>[]
   check('every model is listed in order', response.body['ok'] === true && models.length === 7 && models[0]?.['id'] === 'm1' && models[6]?.['id'] === 'm7')
-  check('shape: absent capacities become null', same(models[2], { id: 'm3', name: 'Three', contextWindow: null, maxTokens: null, input: ['text'], directoryFunction: 'solo_agent_remote' }), JSON.stringify(models[2]))
-  check('shape: present capacities survive', same(models[0], { id: 'm1', name: 'One', contextWindow: 1000, maxTokens: 100, input: ['text'], directoryFunction: 'solo_work_remote' }), JSON.stringify(models[0]))
+  check('shape: absent capacities become null', same(models[2], { id: 'm3', name: 'Three', kind: 'chat', contextWindow: null, maxTokens: null, input: ['text'], directoryFunction: 'solo_agent_remote' }), JSON.stringify(models[2]))
+  check('shape: present capacities survive', same(models[0], { id: 'm1', name: 'One', kind: 'chat', contextWindow: 1000, maxTokens: 100, input: ['text'], directoryFunction: 'solo_work_remote' }), JSON.stringify(models[0]))
   check('no reasoning/multimodal field leaks into the card payload', models.every((model) => !('reasoningEfforts' in model) && !('multimodal' in model)))
+  check('every row carries its kind, so "is this a chat model?" is never a missing field', models.every((model) => model['kind'] === 'chat'), JSON.stringify(models[0]))
+}
+
+// ---------------------------- 2b. the classification, on a directory that really has both
+//
+// The defect: 79 ids — internal workflow components included — reached the model
+// picker. These assertions pin what each of the three answers is FOR: the default
+// view offers conversation models, the diagnostic view explains every verdict, and
+// the clean-up route is the only one that deletes and it names what it deleted.
+console.log('\n[2b] GET /models · GET /models/all · POST /models/prune-internal')
+{
+  const response = await handleApi(get('/models'), deps({ models: () => MIXED_MODELS }))
+  const models = response.body['models'] as Record<string, unknown>[]
+  check('the default view lists ONLY the conversation models', response.body['ok'] === true && models.map((model) => model['id']).join(',') === 'glm-5.2,kimi-k2.6', models.map((model) => model['id']).join(','))
+  check('...and counts both sides of the split', response.body['chatCount'] === 2 && response.body['internalCount'] === 2, JSON.stringify([response.body['chatCount'], response.body['internalCount']]))
+  check('...and names the hidden ids, so the omission is enumerable', JSON.stringify(response.body['internalIds']) === JSON.stringify(['title_generation', 'glm-5.2_advisor_doubao']), JSON.stringify(response.body['internalIds']))
+  check('...and no internal row reaches the list at all', !models.some((model) => model['kind'] === 'internal'))
+
+  const all = await handleApi(get('/models/all'), deps({ models: () => MIXED_MODELS }))
+  const allModels = all.body['models'] as Record<string, unknown>[]
+  check('the diagnostic view lists EVERY row, in catalogue order', allModels.map((model) => model['id']).join(',') === 'glm-5.2,kimi-k2.6,title_generation,glm-5.2_advisor_doubao', allModels.map((model) => model['id']).join(','))
+  check('...with the same two counts as the default view', all.body['chatCount'] === 2 && all.body['internalCount'] === 2)
+  const title = allModels.find((model) => model['id'] === 'title_generation')
+  const advisor = allModels.find((model) => model['id'] === 'glm-5.2_advisor_doubao')
+  check('...and the reason each one was judged, verbatim', typeof title?.['internalReason'] === 'string' && String(title['internalReason']).includes('usage=title_generation'), JSON.stringify(title?.['internalReason']))
+  check('...for the wire-name rule too', String(advisor?.['internalReason']).includes('glm-5.2__dev'), JSON.stringify(advisor?.['internalReason']))
+  check('...while a chat row carries no reason field at all', allModels[0] !== undefined && !('internalReason' in allModels[0]))
+  check('the two views agree on which ids are chat (one derivation, not two)', models.map((m) => m['id']).join(',') === allModels.filter((m) => m['kind'] === 'chat').map((m) => m['id']).join(','))
+
+  // `entryInternalIds` is a DIFFERENT question from `internalCount`: what is in the
+  // USER'S ENTRY, not what the gateway offers. A failing read is `[]`, never a throw.
+  const withEntry = await handleApi(get('/models'), deps({ models: () => MIXED_MODELS, internalInEntry: async () => ['title_generation'] }))
+  check('the entry-scoped read is carried through separately', JSON.stringify(withEntry.body['entryInternalIds']) === JSON.stringify(['title_generation']))
+  const broken = await handleApi(get('/models'), deps({ models: () => MIXED_MODELS, internalInEntry: async () => { throw new Error('settings 挂了') } }))
+  check('a failing entry read is [], not a 500 and not a fabricated count', broken.body['ok'] === true && JSON.stringify(broken.body['entryInternalIds']) === '[]', JSON.stringify(broken.body['entryInternalIds']))
+  const noDep = await handleApi(get('/models'), deps({ models: () => MIXED_MODELS, internalInEntry: undefined }))
+  check('a composition without that dep answers [] too', noDep.body['ok'] === true && JSON.stringify(noDep.body['entryInternalIds']) === '[]')
+  const junk = await handleApi(get('/models'), deps({ models: () => MIXED_MODELS, internalInEntry: async () => ['ok', 42, '', null] as unknown as string[] }))
+  check('non-string ids in the entry list are dropped, not printed', JSON.stringify(junk.body['entryInternalIds']) === JSON.stringify(['ok']), JSON.stringify(junk.body['entryInternalIds']))
+}
+
+{
+  // The delete route: it must run the dep exactly once, hand its removal list back
+  // verbatim, and refuse READABLY when the process has no implementation wired.
+  let calls = 0
+  const pruned: PruneOutcome = { kind: 'pruned', ns: 'llm-pi-ai', removed: ['title_generation', 'glm-5.2_advisor_doubao'], keptModels: 2, backupPath: 'C:/home/.dsh-pylon-trae/backups/cordis.patch.yml.before-dsh-pylon-trae-20261016-000000-47entries.bak' }
+  const response = await handleApi(post('/models/prune-internal', {}), deps({ pruneInternal: async () => { calls += 1; return pruned } }))
+  check('prune runs the write dep exactly once', calls === 1 && response.body['ok'] === true, `calls=${calls}`)
+  check('...and answers kind=pruned', response.body['kind'] === 'pruned', JSON.stringify(response.body['kind']))
+  check('...naming EVERY id it removed', JSON.stringify(response.body['removed']) === JSON.stringify(pruned.removed), JSON.stringify(response.body['removed']))
+  check('...and carrying the whole outcome (backup path included)', same((response.body['outcome'] as Record<string, unknown>)['backupPath'], pruned.backupPath))
+  const nothing = await handleApi(post('/models/prune-internal', {}), deps())
+  check('a prune with nothing to remove says so and still lists `removed: []`', nothing.body['ok'] === true && nothing.body['kind'] === 'nothing' && JSON.stringify(nothing.body['removed']) === '[]', JSON.stringify(nothing.body))
+  // A refusal must not be readable as a successful delete.
+  const refused = await handleApi(post('/models/prune-internal', {}), deps({ pruneInternal: undefined }))
+  check('no prune dep -> ok:false with a reason, and no id list at all', refused.body['ok'] === false && !('removed' in refused.body) && String(refused.body['detail']).includes('没有改动任何配置'), JSON.stringify(refused.body))
+  const failed = await handleApi(post('/models/prune-internal', {}), deps({ pruneInternal: async () => ({ kind: 'rolled-back', ns: 'llm-pi-ai', reasons: ['模型数不符'], backupPath: '/tmp/b.yml' }) }))
+  check('a rolled-back prune is carried through with its reasons', failed.body['ok'] === true && failed.body['kind'] === 'rolled-back' && JSON.stringify((failed.body['outcome'] as Record<string, unknown>)['reasons']) === JSON.stringify(['模型数不符']))
+  const threw = await handleApi(post('/models/prune-internal', {}), deps({ pruneInternal: async () => { throw new Error('磁盘只读') } }))
+  check('a throwing prune dep never escapes as a 500', threw.status === 200 && threw.body['ok'] === false && String(threw.body['detail']).includes('磁盘只读'), JSON.stringify(threw.body))
+  const wrongMethod = await handleApi(get('/models/prune-internal'), deps())
+  check('the delete route is POST-only', wrongMethod.status === 404 && wrongMethod.body['ok'] === false)
+}
+
+{
+  // `/status` is what the card polls, so the two numbers it needs for
+  //「对话模型 N 个（另有 M 个内部组件已隐藏）」have to be on it — and the count of
+  // components still sitting in the USER'S ENTRY is a third, separate fact.
+  const response = await handleApi(get('/status'), deps({ models: () => MIXED_MODELS, internalInEntry: async () => ['title_generation', 'glm-5.2_advisor_doubao'] }))
+  check('/status reports chatCount and internalCount', response.body['chatCount'] === 2 && response.body['internalCount'] === 2, JSON.stringify([response.body['chatCount'], response.body['internalCount']]))
+  check('...while modelCount still means the whole catalogue (unchanged meaning)', response.body['modelCount'] === 4, String(response.body['modelCount']))
+  check('...and entryInternalIds names the junk still in the user\'s entry', JSON.stringify(response.body['entryInternalIds']) === JSON.stringify(['title_generation', 'glm-5.2_advisor_doubao']))
+  const plain = await handleApi(get('/status'), deps())
+  check('a directory of chat models only -> internalCount 0 and an empty entry list', plain.body['chatCount'] === 7 && plain.body['internalCount'] === 0 && JSON.stringify(plain.body['entryInternalIds']) === '[]', JSON.stringify([plain.body['chatCount'], plain.body['internalCount']]))
 }
 
 // ---------------------------------------------------------- 3. models/refresh
@@ -793,6 +907,137 @@ console.log('\n[8] routing and containment')
   check('wrong method falls through to 404', wrongMethod.status === 404 && wrongMethod.body['ok'] === false)
   const badBody = await handleApi({ method: 'POST', path: '/account', body: 'not-an-object' }, deps())
   check('a non-object body does not throw', badBody.body['ok'] === false && String(badBody.body['detail']).includes('accountId'), JSON.stringify(badBody.body))
+}
+
+// ------------------------------------------------------------------- 9. shim
+//
+// The defect this section pins: the loopback shim's `GET /v1/models` listed the WHOLE
+// directory (79 ids on the live CN gateway), while the provider entry pi-ai actually
+// uses carries only the 47 conversation models — one plugin, two different answers to
+// "which models do you serve?", and the shim's number was the wrong one. `GET /healthz`
+// had the same shape of problem: a bare `models: 79` that nothing could be compared
+// against.
+//
+// Both are driven over REAL HTTP here (the shim is a server; its routes cannot be
+// reached any other way), through node:http rather than `fetch`, so the offline guard
+// installed above stays armed.
+console.log('\n[9] shim GET /v1/models · GET /healthz (real HTTP, loopback)')
+
+const SHIM_TOKEN = 'test-shim-token'
+
+/** One real HTTP GET against a shim, using node:http so the offline fetch guard stays intact. */
+function shimGet(port: number, path: string, token: string): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, method: 'GET', headers: { authorization: `Bearer ${token}` } }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk: Buffer) => chunks.push(chunk))
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, text: Buffer.concat(chunks).toString('utf8') }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+/** A port the OS just handed out and released, so the shim can bind a fixed one. */
+async function freePort(): Promise<number> {
+  const probe = createServer()
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve))
+  const address = probe.address()
+  const port = typeof address === 'object' && address !== null ? address.port : 0
+  await new Promise<void>((resolve) => probe.close(() => resolve()))
+  return port
+}
+
+/** A shim that must never reach the network: both routes under test are pure reads. */
+function testShim(port: number, models: readonly TraeModel[], advertised?: () => readonly TraeModel[]) {
+  return createShim({
+    region: 'cn',
+    port,
+    token: SHIM_TOKEN,
+    credential: async () => CREDENTIAL,
+    identity: async () => IDENTITY,
+    models: () => models,
+    ...(advertised === undefined ? {} : { advertisedModels: advertised }),
+    fetchImpl: (() => {
+      throw new Error('test-api: the shim attempted an outbound call on a read-only route')
+    }) as unknown as typeof fetch
+  })
+}
+
+{
+  // The wiring src/index.ts uses: ONE partition, shared by the advertised list and
+  // asserted against the provider entry the same models produce.
+  const port = await freePort()
+  const shim = testShim(port, MIXED_MODELS, () => partitionModels(MIXED_MODELS).chat)
+  await shim.ready
+  try {
+    const listed = await shimGet(port, '/v1/models', SHIM_TOKEN)
+    const payload = JSON.parse(listed.text) as { object?: unknown; data?: { id: string; object?: string }[] }
+    const ids = (payload.data ?? []).map((row) => row.id)
+    const split = partitionModels(MIXED_MODELS)
+    const internalIds = split.internalIds
+    const entry = buildProviderProfile({ displayName: 'Trae', baseUrl: shim.baseUrl(), token: SHIM_TOKEN, models: MIXED_MODELS })
+    const entryIds = entry.models.map((row) => row.id)
+
+    check('[shim] /v1/models answers an OpenAI list on 200', listed.status === 200 && payload.object === 'list' && Array.isArray(payload.data), `status=${listed.status} ${listed.text.slice(0, 120)}`)
+    check('[shim] ...listing the conversation models ONLY', ids.length > 0 && ids.every((id) => split.chat.some((model) => model.id === id)), `ids=${ids.join(',')}`)
+    check('[shim] ...with not one internal id in the body (the 79-vs-47 defect)', internalIds.every((id) => !listed.text.includes(`"${id}"`)), `internal=${internalIds.join(',')}`)
+    check('[shim] ...and the SAME ids the provider entry really got', same(ids, entryIds), `/v1/models=[${ids.join(',')}] entry=[${entryIds.join(',')}]`)
+    check('[shim] ...so the advertised count == the provider entry count', ids.length === entry.models.length && ids.length === split.chat.length, `listed=${ids.length} entry=${entry.models.length} chat=${split.chat.length}`)
+
+    const health = await shimGet(port, '/healthz', SHIM_TOKEN)
+    const record = JSON.parse(health.text) as Record<string, unknown>
+    check('[shim] /healthz names the split instead of one bare number', record['ok'] === true && record['chat'] === 2 && record['internal'] === 2 && record['total'] === 4, JSON.stringify(record))
+    check('[shim] ...chat + internal == the whole directory', Number(record['chat']) + Number(record['internal']) === MIXED_MODELS.length && record['total'] === MIXED_MODELS.length, JSON.stringify(record))
+    check('[shim] ...and `models` means what /v1/models lists, not the catalogue size', record['models'] === ids.length && record['models'] === record['chat'] && record['models'] !== MIXED_MODELS.length, JSON.stringify(record))
+
+    // THE consistency assertion. Same injection, two surfaces: the shim's own OpenAI
+    // list and the plugin API the settings card reads. These are the two places a user
+    // could cross-check, so they must agree — that is the entire fix, pinned.
+    const apiModels = await handleApi(get('/models'), deps({ models: () => MIXED_MODELS }))
+    const apiIds = (apiModels.body['models'] as Record<string, unknown>[]).map((model) => model['id'])
+    check('[shim] CONSISTENCY: /v1/models ids == api /models ids (same catalogue)', same(ids, apiIds), `/v1/models=[${ids.join(',')}] /models=[${apiIds.join(',')}]`)
+  } finally {
+    await shim.close()
+  }
+}
+
+{
+  // Extreme: a directory with nothing to advertise must answer an empty list, not throw
+  // and not fall back to "everything" (which is how the defect would come back).
+  const allInternal: readonly TraeModel[] = [
+    { id: 'title_generation', name: 'title_generation', input: ['text'], directoryFunction: 'chat_v3', kind: 'internal', internalReason: 'usage=title_generation' },
+    { id: 'fast_apply', name: 'fast_apply', input: ['text'], directoryFunction: 'chat_v3', kind: 'internal', internalReason: 'usage=fast_apply' }
+  ]
+  const port = await freePort()
+  const shim = testShim(port, allInternal, () => partitionModels(allInternal).chat)
+  await shim.ready
+  try {
+    const listed = await shimGet(port, '/v1/models', SHIM_TOKEN)
+    const payload = JSON.parse(listed.text) as { data?: unknown[] }
+    check('[shim] a catalogue with NO chat model answers an empty list, not a crash', listed.status === 200 && Array.isArray(payload.data) && payload.data.length === 0, `status=${listed.status} ${listed.text.slice(0, 120)}`)
+    const record = JSON.parse((await shimGet(port, '/healthz', SHIM_TOKEN)).text) as Record<string, unknown>
+    check('[shim] ...and healthz reports 0 chat / all internal, still ok:true', record['ok'] === true && record['chat'] === 0 && record['internal'] === 2 && record['total'] === 2 && record['models'] === 0, JSON.stringify(record))
+  } finally {
+    await shim.close()
+  }
+}
+
+{
+  // No filter injected = the documented compatibility default: advertise everything
+  // `models()` answers. Pinned so "unfiltered" can never silently become "filtered",
+  // or the other way round.
+  const port = await freePort()
+  const shim = testShim(port, MODELS)
+  await shim.ready
+  try {
+    const payload = JSON.parse((await shimGet(port, '/v1/models', SHIM_TOKEN)).text) as { data?: { id: string }[] }
+    check('[shim] without `advertisedModels` the list is unfiltered (assumed chat)', (payload.data ?? []).map((row) => row.id).join(',') === MODELS.map((model) => model.id).join(','), (payload.data ?? []).map((row) => row.id).join(','))
+    const record = JSON.parse((await shimGet(port, '/healthz', SHIM_TOKEN)).text) as Record<string, unknown>
+    check('[shim] ...and healthz then reports no hidden internal component', record['internal'] === 0 && record['total'] === MODELS.length && record['models'] === MODELS.length, JSON.stringify(record))
+  } finally {
+    await shim.close()
+  }
 }
 
 globalThis.fetch = globalFetch

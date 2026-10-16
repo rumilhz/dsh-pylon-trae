@@ -24,7 +24,13 @@ It does **not** depend on, import, or patch `dsh-connect-trae`.
 2. It pulls the live model directory for the signed-in edition (CN or
    international) and decodes the streaming responses.
 3. It serves an OpenAI-compatible endpoint (`/healthz`, `/v1/models`,
-   `/v1/chat/completions`) from a **fixed loopback port**.
+   `/v1/chat/completions`) from a **fixed loopback port**. `/v1/models` advertises the
+   **conversation models only**: the directory also answers with Trae's own IDE workflow
+   components (`title_generation`, `fast_apply`, the `custom_model_*` placeholders, the
+   `*_advisor` / `search_agent_*` aliases), and this plugin tells them apart by **fields**
+   rather than by a hand-written denylist. On the live CN directory that is
+   **47 chat + 32 internal = 79**, and `/healthz` names the parts
+   (`models` / `chat` / `internal` / `total`).
 4. It seeds one provider entry into the `llm-pi-ai` namespace, which is the
    namespace the Models page renders an editor for — so you can add, remove and
    test models from the UI.
@@ -79,7 +85,7 @@ no build step.
 > **四硬前提**见上面英文小节的表格（Trae 已登录 · 7864 空闲 · profile 里没有 `dsh-connect-trae` · Windows）。
 > 装完必须**完全退出 DSH 再打开**，刷新页面不算。
 
-### 状态（截至 2026-10-14 深夜）
+### 状态（截至 2026-10-16；M1~M6 六行是 2026-10-14 深夜的口径，最后一行是 2026-10-16 这一轮加的）
 
 > **M1~M6 是什么**：不是版本号，是**施工顺序**（M = milestone）。
 > 每一步都刻意做成"做完就能单独验证"的一小段，且**顺序保证越早可用**：
@@ -96,9 +102,69 @@ no build step.
 | 卡片 | 浏览器半边：设置卡片（账号/目录/「刷新目录」/「重建清单」/用量/签到/测试） | 设置 → 插件里出现 dsh-pylon-trae 卡片，按钮点得动 | ⏳ **代码已落地**；两个离线闸门全绿。仍差真人重启后点一次 |
 | M5 | 功能对齐（用量积分 / 输入框读数 / 每日签到 / 一键测试 / 图片 / 推理档位） | 上游有的那些功能逐项出现 | ⏳ **已做**：推理档位映射、用量/签到/测试端点与卡片按钮。**未做**：输入框积分读数 + 账号浮层。**图片输入刻意不做**：协议层不翻译 `image_url`，于是目录也不宣告 `image`（理由写在 `src/protocol.ts` 顶部） |
 | M6 | 收尾：把上游 `dsh-connect-trae` 从 profile 移除 | 选择器里只剩本插件那一条 Trae | ⏳ |
+| 过滤 | 目录里 Trae 自己的流程组件**不再算模型**（2026-10-16 本轮） | 模型页只会出现 47 个对话模型；卡片目录行显示「对话模型 47 个（另有 32 个内部组件已隐藏）」，旁边多一个「移除内部组件（N 个）」按钮 | ✅ 判据 + `tools/test-catalog.ts`（56 断言）+ 卡片按钮 + 清理路由都已落地；**清掉已经写进去的旧条目仍需真人点那一次** |
 
 **验证全部跑在临时 profile 上**：`<工作区>\_trae-coldstart\home`（独立 `DSH_HOME`，里面**只**装本插件）。
 把插件装进真 profile（`~/.dsh/profiles/*`）是**部署动作**。
+
+### 目录里的「内部组件」过滤（2026-10-16）
+
+**问题**：写进「设置 → 模型」的 79 条里混着 Trae IDE 自己的流程组件 —— `title_generation`（起标题）、
+`input_optimization`（优化输入）、`fast_apply`（快速套用）、`search_agent_qwen_fast`（搜索）、
+`custom_model_gpt-6`（占位槽）、`glm-5.2_advisor_doubao`（顾问模式）…… 它们都是**真的可调用的
+`config_name`**（所以确实能调通），但**不是对话模型**，出现在模型选择器里就是垃圾项。
+
+**判据：字段判定，不是手写黑名单**（`src/catalog.ts` 的 `classifyDirectoryEntry`）
+
+| 规则 | 判据 | CN 实测命中 |
+|---|---|---|
+| ① 用途 | `usage !== 'chat_completion'` ⇒ internal。`usage` 是目录里**唯一**声明用途的字段 | **23**：`summary` · `fast_apply` · `fast_apply_new` · `title_generation` · `input_optimization` 各 1，加 `custom_model_*` 18 |
+| ② 别名槽 | 该 id 的**全部** listing 行里，没有一行的 `model_detail_list[0].model_name` 含它自己的 `config_name` ⇒ internal | **9** |
+| 合并 | **任一** listing 行说它是自己的模型就算 chat（**OR**，不是 first-wins） | 合计 **32 internal / 47 chat** |
+
+实测的 `usage` 分布（CN，2026-10-16，169 行 / 79 个不重复 `config_name`）：
+`chat_completion` 56 · `custom_model` 18 · `summary` · `fast_apply` · `fast_apply_new` ·
+`title_generation` · `input_optimization` 各 1（= 79）。
+
+**为什么必须是 OR，而不是"保留第一行"**：`solo_work_remote` 是**第一个**被问的 function，它对
+`DeepSeek-V4-Flash` / `DeepSeek-V4-Pro` / `Doubao-Seed-2.0-Code` 返回的是**陈旧 wire**
+（`deepseek_v4_flash__dev` 等）；first-wins 会让**同一份目录**从 47 掉到 44 —— **3 个真模型被静默丢掉**。
+改成 OR 之后连拉两次稳定 **47 chat + 32 internal = 79**：判据成了目录的属性，与网关先答哪一行无关。
+
+**上游 `dsh-connect-trae@3.4.0` 没有做等价的事**：`collectModels`（`:2604-2640`）全收；它只有两个与用途
+**无关**的过滤（`sanitizeCatalog` `:283-290`、`dropDeadModels` `:5303`）。它的注释自称 internals
+不会浮出，靠的是「以 Remote 用户面目录为骨架」这一条**结构性**假设；我们试过那条路（拿它的 32 个名字
+与我们的 79 个求交）**只剩 30 个**，连 `glm-4.6` · `glm-4.7` · `kimi-k2` · `minimax-m2` ·
+`minimax-m2.1` · `qwen3-coder` 这些真模型一起丢 ⇒ **弃用**，改为留在本仓库字段上的判据
+（离线可复现，不需要第二次网关调用）。
+
+**被判为 internal 的 32 个 id（CN，2026-10-16，完整名单）**
+
+```
+title_generation · input_optimization · summary · fast_apply · fast_apply_new
+custom_model_1M · custom_model_1M_text · custom_model_200k · custom_model_200k_text
+custom_model_claude · custom_model_deepseek_chat · custom_model_deepseek_reasoner
+custom_model_deepseek_v4 · custom_model_doubao_1M · custom_model_doubao_256k
+custom_model_gemini · custom_model_gpt-5 · custom_model_gpt-6 · custom_model_kimi
+custom_model_no-fc · custom_model_placeholder · custom_model_vercel · custom_model_vercel_gemini
+browser_use_subagent · explore_sub_agent_v2 · file_search_agent · search_agent_qwen_fast
+search_agent_qwen_fast-0710 · glm-5.1_advisor · glm-5.2_advisor_default · glm-5.2_advisor_doubao
+seed-code-pro-0430
+```
+
+（同一份 32 条逐字冻结在 `tools/test-catalog.ts` 的 `INTERNAL_ROSTER`：判据或名单一变，那个**先红**。）
+
+**边界**：缺 `usage` 或缺 `model_name` 的畸形行**一律判 internal**（绝不误判为 chat）。方向是刻意的 ——
+隐藏一个真模型的代价是"用户少看到一个选项"，而放进一个流程组件正是这次要修的问题；而且被隐藏的 id 会经
+`SeedOutcome.skippedInternal`、`GET /models/all`、`boot.log` 三处报出来，所以可发现、可撤回。
+
+**用户怎么清掉已经写进去的垃圾条目**：只有一条路 ——
+**「设置 → 模型」→ Trae 卡片 → ② 目录行 → 「移除内部组件（N 个）」**。
+不点就**一个字都不动**（插件在启动时故意不自动删用户配置，只在 `boot.log` 里留一行提示）：
+
+```
+internal: 检测到 N 个内部组件仍在你的条目里（…）—— 未自动删除；在设置卡片点「移除内部组件」即可清除（会先备份到 profile 之外）
+```
 
 ### 怎么验（全部可复制）
 
@@ -108,7 +174,7 @@ no build step.
 set NODE=<node>
 ```
 
-#### ① 服务端离线回归（不联网、不花额度）—— 当前 **10/10 套件 PASS**
+#### ① 服务端离线回归（不联网、不花额度）—— 当前 **11/11 套件 PASS**
 
 ```bat
 %NODE% tools\_run-suites.mjs
@@ -119,14 +185,18 @@ set NODE=<node>
 ```bat
 %NODE% tools\check-entry.ts        :: 入口能 import、Config 校验（本机：ENTRY OK）
 %NODE% tools\test-seed.ts          :: 写路径 create/present/refresh/回滚 + 备份保留策略（真文件系统 e2e）
-%NODE% tools\test-api.ts           :: 端点处理函数
+%NODE% tools\test-api.ts           :: 端点处理函数（本机：172/172）
+%NODE% tools\test-catalog.ts       :: 目录分类：哪些 config_name 是对话模型、哪些是内部组件
 %NODE% tools\test-reasoning.ts     :: 推理档位映射
+%NODE% tools\test-contract.ts      :: 与钉死的上游 dsh-connect-trae@3.4.0 对线（本机：127 passed · 0 failed）
 %NODE% tools\client-bundle-check.mjs  :: 卡片 bundle
 %NODE% tools\client-route-check.mjs   :: 宿主路由 handler，走真 HTTP
 ```
 
-> `tools/test-seed.ts` 与 `client-*.mjs` **自己不打总数**（只打 `ALL CHECKS PASSED` / `N/N`），
-> 所以判据始终是**退出码 0**，不是某一行的数字。
+> `tools/_run-suites.mjs` 本机（2026-10-16）的输出是 `11 passed · 0 failed · 0 skipped · offline only`，
+> 退出码 0。本轮新加的就是 `test-catalog`（56 条断言：2026-10-16 实测的 169 行 / 79 个 id 冻结在套件里）。
+> `tools/test-seed.ts` · `tools/test-catalog.ts` 与 `client-*.mjs` **自己不打总数**
+> （只打 `ALL CHECKS PASSED` / `N/N`），所以判据始终是**退出码 0**，不是某一行的数字。
 
 再加两项**联网只读**检查（只拉目录、只起回环服务，不产生生成、不花额度）：
 
@@ -238,6 +308,21 @@ host route: fence 403 tolerated as a loopback port hop (host=… origin=…) —
 路径与 edition 表按三平台（win32/darwin/linux）写好，但 macOS / Linux **没有真机验证**；
 国际版（`ai` 区域）同理 —— 本机没有国际版凭据，代码结构保留了 `cn/ai` 双桶，等有账号时再验。
 
+**⑤ 手打一个内部组件的 id，仍然会被转发出去 —— 刻意如此。**
+
+回环 `GET /v1/models` 只公布对话模型，但 `POST /v1/chat/completions` 解析 `model` 用的是**全目录**：
+用户自己往模型页里手打一个 internal id（如 `title_generation`），请求会按它的真名转发到 Trae。
+理由写在 `src/shim.ts` 里（`handleChat` 上方）：用户手打的 id 可能是网关还没列出来的新模型，
+"按真名转发、让 Trae 自己回答"比我们替他拒绝更诚实。这是**刻意保留**的，不是过滤漏了一处。
+
+**⑥ `/v1/models` 不按 id 去重，而写进 provider 条目的那一份会去重。**
+
+`src/seed.ts` 的 `buildProviderProfile` 用 `seen` 集合按 id 去重；`src/shim.ts` 只是把
+`advertisedModels()` 原样映射成 OpenAI list。**当前目录已经按 id 去重**（`fetchDirectoryModels`
+用 `byId` Map 归并同一个 `config_name` 的多个 function 行），所以这两个面没有分歧；
+若将来网关真的给出重复 id，分歧会先在 `tools/test-api.ts` [9] 节的一致性断言
+（`/v1/models` 的 id 集合 == provider 条目的 id 集合）上变红，而不是静默地一边多、一边少。
+
 ### 目录结构
 
 ```
@@ -245,16 +330,24 @@ src/format.ts     ← 生成物（tools/extract-format.mjs）：Trae 自身格�
 src/paths.ts      ← 三个平台的安装/数据目录探测（4 个 edition，desktop + CLI）
 src/auth.ts       ← 凭据读取与解密（自研实现）、账号归一化、CLI JWT 解析
 src/identity.ts   ← 机器/设备身份（读 Trae 自己的文件，绝不伪造）
-src/catalog.ts    ← 实时目录拉取（逐 function 取并集）+ 静态兜底 + 请求头契约 + 推理档位解析
+src/catalog.ts    ← 实时目录拉取（逐 function 取并集）+ **分类判据**（哪些 config_name 是对话模型、
+                    哪些是 Trae IDE 自己的流程组件：classifyDirectoryEntry / partitionModels）
+                    + 静态兜底 + 请求头契约 + 推理档位解析
 src/protocol.ts   ← 请求翻译（OpenAI → Trae）+ 命名 SSE 解码（Trae → OpenAI chunk）
-src/shim.ts       ← 固定端口回环门面：/healthz · /v1/models · /v1/chat/completions
+src/shim.ts       ← 固定端口回环门面：/healthz（models / chat / internal / total 四个具名计数）·
+                    /v1/models（**只列对话模型**，由 ShimOptions.advertisedModels() 注入，
+                    与写 provider 条目用的是同一个 partition）· /v1/chat/completions（model 解析走全目录）
                     以及 /admin/* 与 /plugins/dsh-pylon-trae/* 两条插件端点前缀，同一条 Bearer
-src/seed.ts       ← 找 namespace、生成供应商条目、create / present / refresh（只增不删）
+src/seed.ts       ← 找 namespace、生成供应商条目（**只写 kind === 'chat'**）、create / present /
+                    refresh（只增不删）、pruneInternalModels（点了「移除内部组件」才删：
+                    删前备份到 profile 之外、写后核对、任一不过逐字节回滚）
 src/guard.ts      ← 写路径安全网：写前备份、写后由纯函数 judgePatchWrite 核对四条
                     （条目不少 / 文件不空 / provider 真在 providers 字典里 / 模型数等于期望）；
                     "读不到"判失败（"无法确认" ≠ "确认无误"），任一不过就逐字节回滚
-src/api.ts        ← 端点处理函数（与传输无关，可离线测）；/models/reload（只读重拉）与
-                    /models/refresh（只增不删写配置）是两条不同的路由
+src/api.ts        ← 端点处理函数（与传输无关，可离线测）；/models（**只给对话模型**）·
+                    /models/all（全部条目 + 每条的 internalReason，只读诊断）·
+                    /models/reload（只读重拉）与 /models/refresh（只增不删写配置）是两条不同的路由；
+                    /models/prune-internal 是**唯一**会删模型条目的路由
 src/index.ts      ← 插件入口：配置 + 起服务 + 种子 + 账号状态/墓碑集合（落 .dsh-pylon-trae/state.json）
 lib/client.js     ← 浏览器半边：设置卡片（两个席位；**不碰**回环 token，只走宿主路由）
 tools/            ← 见上面「怎么验」；另有 make-temp-profile.mjs（临时 profile 配方）

@@ -222,7 +222,7 @@ eq('no token-shaped literal (40+ char base64url run)', tokenish.filter((run) => 
 
 /* ────────────────── 6. request paths ────────────────── */console.log('\n[6] request paths match the two host route prefixes')
 eq('ROUTE_BASE', JSON.stringify(I.ROUTE_BASE), JSON.stringify(['/api/plugins/dsh-pylon-trae', '/plugins/dsh-pylon-trae']))
-const KNOWN_ENDPOINTS = new Set(['/status', '/models', '/models/reload', '/models/refresh', '/account', '/usage', '/checkin', '/models/test'])
+const KNOWN_ENDPOINTS = new Set(['/status', '/models', '/models/reload', '/models/refresh', '/account', '/usage', '/checkin', '/models/test', '/models/prune-internal'])
 for (const [name, path] of Object.entries(I.EP)) {
   truthy(`EP.${name} = ${JSON.stringify(path)} is a known src/api.ts endpoint`, KNOWN_ENDPOINTS.has(path))
   truthy(`EP.${name} starts with "/"`, path.startsWith('/'))
