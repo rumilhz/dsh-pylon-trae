@@ -23,6 +23,7 @@ import {
 import type { TraeIdentity } from './identity.ts'
 import type { TraeRegion } from './paths.ts'
 import { buildTraeBody, decodeTraeEvent, parseSseStream } from './protocol.ts'
+import { businessRefusal, MAX_POST_BODY_CHARS, post, readBusinessCode, readQuota, unreadableCodeDetail } from './quota.ts'
 import type { PruneOutcome, SeedOutcome } from './seed.ts'
 
 export interface TraeAccountInfo {
@@ -213,19 +214,6 @@ function boundLine(value: unknown): string {
   return flat === '' ? '(服务端没有给出原因)' : flat.slice(0, DETAIL_CHARS)
 }
 
-/**
- * Read this much of an answer before giving up on it. It is a memory bound, so it
- * has to sit far above anything a gateway legitimately sends: the entitlements
- * envelope is already several KiB, and slicing at that scale cut real JSON in half
- * (see the note in `post`).
- */
-const MAX_POST_BODY_CHARS = 1 << 20
-
-/**
- * How much of an unexpected body a detail line may quote. Only ever used to build
- * the `text` a caller prints — never a parse input.
- */
-const POST_EXCERPT_CHARS = 200
 
 /**
  * How much of an account-scan failure a `/status` answer may quote. That scan reads
@@ -254,171 +242,6 @@ const DETAIL_CHARS = 700
  * `truncated`) rather than silently probed.
  */
 const MAX_PROBE_MODELS = 10
-
-interface PostResult {
-  status: number
-  payload: Record<string, unknown>
-  /** Bounded, never-empty excerpt of the body; for a detail line, not for parsing. */
-  text: string
-  /** The body was a complete JSON object (an envelope, not a proxy page / array / empty). */
-  jsonObject: boolean
-  /** The body was longer than `MAX_POST_BODY_CHARS`, so it was never parsed in full. */
-  bodyTruncated: boolean
-}
-
-async function post(
-  base: string,
-  path: string,
-  body: unknown,
-  headers: Record<string, string>,
-  fetchImpl: typeof fetch
-): Promise<PostResult> {
-  const response = await fetchImpl(traeEndpoint(base, path), {
-    method: 'POST',
-    headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20000)
-  })
-  // Parse the body BEFORE shortening anything for display. The old code sliced the
-  // text to 4096 characters and only then called JSON.parse, so a complete, honest
-  // envelope larger than that was cut mid-string and reported as "not a JSON object"
-  // — the gateway blamed for the plugin's own truncation. The cap below is a memory
-  // bound and is reported as such (`bodyTruncated`), never as a malformed body.
-  const raw = await response.text().catch(() => '')
-  if (raw.length > MAX_POST_BODY_CHARS) {
-    return {
-      status: response.status,
-      payload: {},
-      text: excerptOf(raw.slice(0, POST_EXCERPT_CHARS)),
-      jsonObject: false,
-      bodyTruncated: true
-    }
-  }
-  let payload: Record<string, unknown> = {}
-  // `jsonObject` is what separates "the gateway answered an envelope" from "something
-  // in between answered something else": both give an empty `payload`, and a route
-  // that only looks at `payload` cannot tell the difference. An HTML proxy page, an
-  // empty body and a JSON array all land here with `jsonObject: false`.
-  let jsonObject = false
-  try {
-    const parsed: unknown = JSON.parse(raw)
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      payload = parsed as Record<string, unknown>
-      jsonObject = true
-    }
-  } catch {
-    // non-JSON answers are reported by their HTTP status and body excerpt
-  }
-  return { status: response.status, payload, text: excerptOf(raw), jsonObject, bodyTruncated: false }
-}
-
-/** A bounded, non-throwing JSON spelling of an unexpected value, for a detail line. */
-function literalOf(value: unknown): string {
-  if (typeof value === 'string') return JSON.stringify(value.slice(0, 80))
-  try {
-    const text = JSON.stringify(value)
-    return text === undefined ? String(value).slice(0, 80) : text.slice(0, 80)
-  } catch {
-    return String(value).slice(0, 80)
-  }
-}
-
-/**
- * One line of body text for a detail string: never empty (an empty body would leave
- * the sentence dangling on a colon) and never unbounded.
- */
-function excerptOf(text: string): string {
-  const flat = text.replace(/\s+/g, ' ').trim()
-  return flat === '' ? '(empty body)' : flat.slice(0, POST_EXCERPT_CHARS)
-}
-
-/** How a gateway envelope spells its business code: usually a number, sometimes a string. */
-type BusinessCode = { kind: 'ok' } | { kind: 'refused'; code: number } | { kind: 'unreadable'; literal: string }
-
-/**
- * Read a gateway's business `code` without guessing.
- *
- * The pay gateway answers with a JSON number in most places, but the same family
- * has been seen spelling it as a numeric string (`"0"`, `"3001"`). The old
- * `typeof code === 'number' ? code : 0` turned every string form into 0, so a
- * refusal was read as success. Here a number is used as-is, a string of digits is
- * converted, and any other shape (`"abc"`, `null`, `{}`) is `unreadable` — the
- * caller must refuse that instead of inventing a 0.
- *
- * A missing `code` is not a refusal: the check-in status answer carries no code at
- * all and is understood from its own fields.
- */
-function readBusinessCode(payload: Record<string, unknown>): BusinessCode {
-  if (!('code' in payload)) return { kind: 'ok' }
-  const raw = payload['code']
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return raw === 0 ? { kind: 'ok' } : { kind: 'refused', code: raw }
-  }
-  if (typeof raw === 'string' && /^[+-]?\d+$/.test(raw.trim())) {
-    const value = Number(raw.trim())
-    if (Number.isFinite(value)) return value === 0 ? { kind: 'ok' } : { kind: 'refused', code: value }
-  }
-  return { kind: 'unreadable', literal: literalOf(raw) }
-}
-
-/** The `: message` tail every refusal line shares (bounded, omitted when empty). */
-function messageTail(payload: Record<string, unknown>): string {
-  const message = String(payload['message'] ?? '').slice(0, 160)
-  return message === '' ? '' : `: ${message}`
-}
-
-/** The line for a code whose shape this plugin cannot read at all. */
-function unreadableCodeDetail(payload: Record<string, unknown>, what: string, literal: string): string {
-  return `${what} answered a code this plugin cannot interpret (${literal})${messageTail(payload)}`
-}
-
-/**
- * A detail line for a business code that is present and not OK — or `null` when the
- * envelope carries no refusal (missing code, or code 0) and the caller may proceed.
- *
- * Shared by every route that reads an envelope so they cannot drift apart: the
- * check-in status GET used to skip this check entirely and report a refusal as
- * "not checked in today".
- */
-function businessRefusal(payload: Record<string, unknown>, what: string): string | null {
-  const verdict = readBusinessCode(payload)
-  if (verdict.kind === 'ok') return null
-  if (verdict.kind === 'refused') return `${what} refused with code ${verdict.code}${messageTail(payload)}`
-  return unreadableCodeDetail(payload, what, verdict.literal)
-}
-
-/**
- * Pull the numbers a user recognises out of the entitlements payload.
- *
- * Deliberately tolerant and shallow-recursive: the CN pay gateway nests its
- * figures (`usage_summary`, `user_entitlement_pack_list`), and this plugin should
- * report what is really there under the gateway's own field names rather than
- * fabricate a "Work: 0" from a guessed schema.
- */
-function extractNumbers(payload: Record<string, unknown>, depth = 0, prefix = ''): Record<string, number> {
-  const out: Record<string, number> = {}
-  for (const [key, value] of Object.entries(payload)) {
-    const name = prefix === '' ? key : `${prefix}.${key}`
-    // Match on the LEAF name only: testing the dotted path made every field under
-    // `…entitlement_base_info` look like a credit figure (timestamps included).
-    if (typeof value === 'number' && Number.isFinite(value) && /credit|point|usage|quota|amount|balance/i.test(key)) {
-      out[name] = value
-      continue
-    }
-    if (depth < 2 && typeof value === 'object' && value !== null && !Array.isArray(value)) {
-      Object.assign(out, extractNumbers(value as Record<string, unknown>, depth + 1, name))
-      continue
-    }
-    if (depth < 2 && Array.isArray(value)) {
-      for (const [index, entry] of value.entries()) {
-        if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
-          Object.assign(out, extractNumbers(entry as Record<string, unknown>, depth + 1, `${name}[${index}]`))
-        }
-      }
-    }
-  }
-  return out
-}
 
 /** Codes the gateways use for "you cannot call this model", as measured upstream. */
 function classifyProbeStatus(status: number, firstErrorCode: number | undefined): { verdict: string; detail: string } {
@@ -658,24 +481,22 @@ export async function handleApi(request: ApiRequest, deps: ApiDeps): Promise<Api
     }
 
     if (request.method === 'GET' && path === '/usage') {
-      const [credential, identity] = await Promise.all([deps.credential(), deps.identity()])
-      if (credential.region !== 'cn') return bad('usage credits are CN-only; the international region is subscription-based')
-      const headers = buildTraeHeaders(credential, identity, 'application/json')
-      const { status, payload, text, jsonObject, bodyTruncated } = await post(REGION_GATEWAYS.cn.pay, '/trae/api/v2/pay/web_user_ent_usage', { require_usage: true }, headers, fetchImpl)
-      if (status !== 200) return bad(`pay gateway answered HTTP ${status}: ${text}`)
-      // Truncated-for-memory comes first: parsing that prefix would only report the
-      // plugin's own cap as a malformed gateway answer.
-      if (bodyTruncated) return bad(`pay gateway answered more than ${MAX_POST_BODY_CHARS} characters; refusing to read it as an envelope: ${text}`)
-      // A 200 whose body is not a JSON object (a proxy's HTML page, an empty body, a
-      // bare array) carries no envelope at all; reading it as `payload = {}` used to
-      // return `ok:true, credits: {}` — a success reporting zero numbers as if the
-      // account really had none. The excerpt says what actually came back.
-      if (!jsonObject) return bad(`pay gateway answered HTTP ${status} but the body is not a JSON object: ${text}`)
-      // A string code ("0" / "3001") is read as the number it spells; a code that
-      // cannot be read at all is refused rather than assumed to be 0.
-      const refusal = businessRefusal(payload, 'pay gateway')
-      if (refusal !== null) return bad(refusal)
-      return ok({ region: 'cn', credits: extractNumbers(payload), payloadKeys: Object.keys(payload) })
+      // ONE reading, two consumers. The gateway call, the envelope checks and the
+      // number extraction live in `src/quota.ts` (`readQuota`) and are shared with
+      // the `traeQuota` Cordis service — so the card's usage row and the service a
+      // router injects can never disagree about what the gateway said.
+      //
+      // This route keeps its own (weaker) success rule: a readable envelope is
+      // enough to answer `ok:true` with the fields it saw, because the card prints
+      // them verbatim. The service's snapshot is `ok` only when it really got an
+      // amount — that difference is `QuotaRead.ok` vs `QuotaRead.snapshot.status`.
+      const reading = await readQuota({
+        credential: () => deps.credential(),
+        identity: () => deps.identity(),
+        fetchImpl
+      })
+      if (!reading.ok) return bad(reading.detail ?? 'usage read failed')
+      return ok({ region: 'cn', credits: reading.credits ?? {}, payloadKeys: reading.payloadKeys ?? [] })
     }
 
     if (path === '/checkin') {

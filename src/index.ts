@@ -39,6 +39,7 @@ import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, read
 import { userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 import { handleApi, type ReloadResult, type TraeAccountInfo } from './api.ts'
+import { createQuotaService } from './quota.ts'
 import {
   canRefresh,
   credentialStorePath,
@@ -302,6 +303,15 @@ interface Ctx {
   inject(names: string[], callback: (ctx: Ctx) => void): void
   effect(callback: () => void | (() => void)): void
   fiber?: { entry?: { options?: { id?: string } } }
+  /**
+   * Register a SERVICE other plugins can inject — Cordis' own API, measured on
+   * this host at `@deepseek-ai/cordis/src/reflect.ts:44-46` (overloads) and
+   * `:277` (implementation): `provide(name: string, value?: any, check?: () =>
+   * boolean): () => void`. Optional in this interface because the offline
+   * harnesses build their own `Ctx` and must not be forced to fake a service
+   * registry; the plugin guards on its presence rather than assuming it.
+   */
+  provide?(name: string, value: unknown): unknown
 }
 
 /**
@@ -643,6 +653,61 @@ function describeOutcome(outcome: SeedOutcome): string {
  * a stored baseURL that answers nothing is worse than no entry at all.
  */
 export function apply(ctx: Ctx, config: TraeConfig): void {
+  /**
+   * ── 对外提供的 Cordis 服务：`traeQuota` ──────────────────────────────────
+   *
+   * Registered HERE, before the `enabled` gate below is consulted, for one
+   * reason: a consumer that says `ctx.inject(['traeQuota'], ...)` must get an
+   * ANSWER (even when this plugin is switched off, the answer is `off`), not a
+   * service that silently never appears and leaves the router guessing.
+   *
+   * `createQuotaService` caches; `getQuota()` is synchronous and never touches
+   * the network, `refresh()` is the only path that reads the gateway. The service
+   * name differs from the workbuddy plugin's on purpose (`traeQuota` vs
+   * `workbuddyQuota`): two plugins providing ONE name in the same process is a
+   * registration collision, and the SNAPSHOT shapes are what must match.
+   *
+   * The prewarm runs on a MICROTASK, not inline: `apply` has not yet finished
+   * initialising the closure state `credential()` reads (`credentialCache`
+   * below), and calling it synchronously here would hit that TDZ instead of the
+   * credentials. A microtask runs after `apply` returns, which is exactly "the
+   * plugin is loaded, warm the cache without delaying the boot".
+   *
+   * The warm-up is INSIDE the `provide` branch on purpose: a harness that builds
+   * a stub `Ctx` (tools/client-route-check.mjs) has no service registry, so it
+   * also must not spend a real gateway request — the offline suites stay offline.
+   */
+  try {
+    const provide = ctx.provide
+    if (typeof provide !== 'function') {
+      // Honest fallback: the host API changed (or this is a stub harness). Say so
+      // in the trace; the shim and the provider entry are unaffected.
+      trace('quota: ctx.provide 不存在 —— traeQuota 服务未注册（stub 宿主或宿主 API 与本插件预期不同；回环服务与供应商条目不受影响）')
+    } else {
+      const quotaService = createQuotaService(
+        { credential: () => credential(), identity: () => identity() },
+        { enabled: config.enabled, log: (message: string) => trace(`quota: ${message}`) }
+      )
+      provide.call(ctx, 'traeQuota', quotaService)
+      trace(`quota: 已注册 Cordis 服务 traeQuota（enabled=${config.enabled}）`)
+      if (config.enabled) {
+        void Promise.resolve()
+          .then(() => quotaService.refresh?.())
+          .then((snapshot) => {
+            if (snapshot === undefined) return
+            trace(`quota: 启动预热 status=${snapshot.status}${snapshot.message === undefined ? '' : ` message=${snapshot.message}`}`)
+          })
+          .catch((error: unknown) => {
+            trace(`quota: 启动预热失败 —— ${error instanceof Error ? error.message : String(error)}`)
+          })
+      }
+    }
+  } catch (error) {
+    // A duplicate name (another plugin already provided `traeQuota`) throws. That
+    // must not kill the boot: the rest of the plugin works without the service.
+    trace(`quota: 注册 traeQuota 失败 —— ${error instanceof Error ? error.message : String(error)}`)
+  }
+
   if (!config.enabled) {
     ctx.logger.info('dsh-pylon-trae: 已停用（enabled=false），未启动回环服务、未写配置')
     return

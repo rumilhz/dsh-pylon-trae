@@ -45,6 +45,12 @@ const SUITES = [
   ...(existsSync(join(HERE, 'test-credentials.ts')) ? [['credential store + boot reconciliation (offline)', 'test-credentials.ts', []]] : []),
   ['credential + paths (offline)', 'probe-m1.ts', ['--no-network']],
   ...(existsSync(join(HERE, 'test-api.ts')) ? [['api handlers (offline)', 'test-api.ts', []]] : []),
+  // The `traeQuota` Cordis service OTHER plugins inject, plus the one reading
+  // `/usage` now reuses: status mapping (ok/off/error), the percent rule
+  // (limit<=0 -> no percent, never divide), cache semantics (getQuota never
+  // fetches; refresh is the only pull; expiry alone never renews) and the
+  // snapshot shape shared with `workbuddyQuota`. Self-made fetch throughout.
+  ...(existsSync(join(HERE, 'test-quota.ts')) ? [['quota service + shared usage read (offline)', 'test-quota.ts', []]] : []),
   // The credential's own expiry verdict and its refresh contract: no network (the
   // transport is injected), no real token, and every write inside a temp directory.
   ...(existsSync(join(HERE, 'test-auth.ts')) ? [['credential expiry + refresh (offline)', 'test-auth.ts', []]] : []),
